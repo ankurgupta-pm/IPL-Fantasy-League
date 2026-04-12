@@ -26,11 +26,13 @@ Build an IPL Fantasy League web app based on a provided JSX file with all logic 
 8. Excel import/export for teams
 9. JSON backup/restore (compatible with original Claude artifact prototype format)
 10. Analytics dashboard
+11. Match detail modal for viewing/editing per-match scores
 
 ## What's Been Implemented
+
 ### Phase 1 (Initial MVP) - Jan 2026
 - Backend API with 25+ endpoints
-- Login page with admin/guest access
+- Login page with admin/guest access + sessionStorage persistence
 - Leaderboard page with 88 matches
 - Settings page
 - Admin panel (user viewing)
@@ -41,33 +43,42 @@ Build an IPL Fantasy League web app based on a provided JSX file with all logic 
 - Searchable player dropdown (auto-fills franchise & role)
 - Substitution system with tracking
 - Excel template download, import, and export
-- Search by name + filter by franchise
-- Backup export in exact JSX prototype format (keys: settings, playerMaster, teamA, teamB, subsA, subsB, matches, matchPoints, users)
+- Backup export in exact JSX prototype format
 - Backup import supporting BOTH old JSX format AND new API format
-- Settings page with backup/restore section
+- Bug fix: Import no longer logs out user (sessionStorage)
+- Bug fix: Import preserves admin credentials
+
+### Phase 3 (Match Detail Modal) - Jan 2026
+- Click any match on Leaderboard to open detail modal
+- Per-player score editing (runs, wickets) with auto-calculated points
+- Manual adjustment per team
+- Team tabs (Ankur/Sarawat) filtering by playing franchise
+- Add/remove manual players
+- Edit Match info (teams, venue, date) — admin only
+- Save Changes persists to backend
+- Refresh buttons (CricketData API / Claude AI) inside modal
+- Score summary with team totals and diff
 
 ## Prioritized Backlog
-### P0 (Critical)
+### P0 (Critical) - DONE
 - [x] Authentication system
 - [x] Leaderboard page
 - [x] Teams page with full CRUD
 - [x] Substitution feature
 - [x] Backup/Restore (JSX format compatible)
+- [x] Match Detail Modal (view/edit scores)
 
 ### P1 (Important)
 - [ ] Analytics page (player-wise performance, match-by-match breakdown)
-- [ ] Match detail modal (view/edit player scores per match)
 - [ ] Admin panel - user CRUD (create, edit, delete users)
 - [ ] Password change functionality
 
 ### P2 (Nice to have)
 - [ ] Player master config modal (add/edit/delete from master list)
 - [ ] Fetch IPL squads from web (Claude AI integration)
-- [ ] Match add/edit modal
-- [ ] CricketData Match ID modal for manual ID entry
+- [ ] Add new match modal from leaderboard
 
 ## Next Tasks
 1. Build Analytics page with sortable player statistics table
-2. Build Match Detail modal for viewing/editing per-match scores
-3. Add user CRUD in Admin panel
-4. Add password change functionality
+2. Add user CRUD in Admin panel
+3. Add password change functionality
