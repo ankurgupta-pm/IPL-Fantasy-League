@@ -668,54 +668,102 @@ async def update_settings(settings: Settings):
 
 @api_router.get("/backup/export")
 async def export_backup():
-    """Export all data as JSON"""
+    """Export all data as JSON in the original JSX prototype format.
+    Keys: settings, playerMaster, teamA, teamB, subsA, subsB, matches, matchPoints, users
+    """
+    teams = await db.teams.find_one({}, {"_id": 0}) or {"teamA": [], "teamB": []}
+    subs = await db.substitutions.find_one({}, {"_id": 0}) or {"teamA": 0, "teamB": 0}
+    match_points_list = await db.match_points.find({}, {"_id": 0}).to_list(1000)
+    # Convert array to object keyed by matchId (original JSX format)
+    match_points_dict = {mp["matchId"]: mp for mp in match_points_list}
+
     data = {
-        "users": await db.users.find({}, {"_id": 0}).to_list(1000),
-        "players": await db.players.find({}, {"_id": 0}).to_list(10000),
-        "teams": await db.teams.find_one({}, {"_id": 0}) or {"teamA": [], "teamB": []},
-        "matches": await db.matches.find({}, {"_id": 0}).to_list(1000),
-        "matchPoints": await db.match_points.find({}, {"_id": 0}).to_list(1000),
         "settings": await db.settings.find_one({}, {"_id": 0}) or Settings().dict(),
-        "substitutions": await db.substitutions.find_one({}, {"_id": 0}) or {"teamA": 0, "teamB": 0}
+        "playerMaster": await db.players.find({}, {"_id": 0}).to_list(10000),
+        "teamA": teams.get("teamA", []),
+        "teamB": teams.get("teamB", []),
+        "subsA": subs.get("teamA", 0),
+        "subsB": subs.get("teamB", 0),
+        "matches": await db.matches.find({}, {"_id": 0}).to_list(1000),
+        "matchPoints": match_points_dict,
+        "users": await db.users.find({}, {"_id": 0}).to_list(1000),
     }
     return data
 
 @api_router.post("/backup/import")
 async def import_backup(data: Dict[str, Any] = Body(...)):
-    """Import data from JSON backup"""
+    """Import data from JSON backup.
+    Accepts BOTH original JSX format (teamA/teamB/subsA/subsB/playerMaster)
+    AND the newer API format (teams/substitutions/players).
+    """
     try:
-        if "users" in data:
+        # Detect format: original JSX uses `teamA` at root, newer uses `teams`
+        is_jsx_format = "teamA" in data or "playerMaster" in data
+
+        # Users
+        users_data = data.get("users")
+        if users_data:
             await db.users.delete_many({})
-            if data["users"]:
-                await db.users.insert_many(data["users"])
-        
-        if "players" in data:
+            await db.users.insert_many(users_data)
+
+        # Players (master list)
+        players_data = data.get("playerMaster") if is_jsx_format else data.get("players")
+        if players_data:
             await db.players.delete_many({})
-            if data["players"]:
-                await db.players.insert_many(data["players"])
-        
-        if "teams" in data:
+            await db.players.insert_many(players_data)
+
+        # Teams
+        if is_jsx_format:
+            teams_data = {
+                "teamA": data.get("teamA", []),
+                "teamB": data.get("teamB", [])
+            }
+        else:
+            teams_data = data.get("teams")
+        if teams_data:
             await db.teams.delete_many({})
-            await db.teams.insert_one(data["teams"])
-        
-        if "matches" in data:
+            await db.teams.insert_one(teams_data)
+
+        # Matches
+        matches_data = data.get("matches")
+        if matches_data:
             await db.matches.delete_many({})
-            if data["matches"]:
-                await db.matches.insert_many(data["matches"])
-        
-        if "matchPoints" in data:
+            await db.matches.insert_many(matches_data)
+
+        # Match Points — can be object (keyed by matchId) or array
+        mp_data = data.get("matchPoints")
+        if mp_data:
             await db.match_points.delete_many({})
-            if data["matchPoints"]:
-                await db.match_points.insert_many(data["matchPoints"])
-        
-        if "settings" in data:
+            if isinstance(mp_data, dict):
+                # JSX format: object keyed by matchId
+                mp_list = []
+                for match_id, mp_val in mp_data.items():
+                    if isinstance(mp_val, dict):
+                        mp_val["matchId"] = mp_val.get("matchId", match_id)
+                        mp_list.append(mp_val)
+                if mp_list:
+                    await db.match_points.insert_many(mp_list)
+            elif isinstance(mp_data, list) and mp_data:
+                await db.match_points.insert_many(mp_data)
+
+        # Settings
+        settings_data = data.get("settings")
+        if settings_data:
             await db.settings.delete_many({})
-            await db.settings.insert_one(data["settings"])
-        
-        if "substitutions" in data:
+            await db.settings.insert_one(settings_data)
+
+        # Substitutions
+        if is_jsx_format:
+            subs_data = {
+                "teamA": data.get("subsA", 0),
+                "teamB": data.get("subsB", 0)
+            }
+        else:
+            subs_data = data.get("substitutions")
+        if subs_data:
             await db.substitutions.delete_many({})
-            await db.substitutions.insert_one(data["substitutions"])
-        
+            await db.substitutions.insert_one(subs_data)
+
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
