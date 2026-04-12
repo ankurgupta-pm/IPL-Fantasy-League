@@ -75,7 +75,7 @@ function parseExcel(file, callback) {
   reader.readAsArrayBuffer(file);
 }
 
-export default function TeamsPage({ currentUser, showToast }) {
+export default function TeamsPage({ compId, currentUser, showToast }) {
   const [activeTeam, setActiveTeam] = useState('teamA');
   const [players, setPlayers] = useState({ teamA: [], teamB: [] });
   const [subs, setSubs] = useState({ teamA: 0, teamB: 0 });
@@ -97,9 +97,9 @@ export default function TeamsPage({ currentUser, showToast }) {
   const loadData = useCallback(async () => {
     try {
       const [teamsRes, subsRes, settingsRes, playersRes] = await Promise.all([
-        api.getTeams(),
-        api.getSubstitutions(),
-        api.getSettings(),
+        api.getTeams(compId),
+        api.getSubstitutions(compId),
+        api.getSettings(compId),
         api.getPlayers()
       ]);
       setPlayers(teamsRes.data);
@@ -111,7 +111,7 @@ export default function TeamsPage({ currentUser, showToast }) {
       showToast('Failed to load team data', 'error');
       setLoading(false);
     }
-  }, [showToast]);
+  }, [compId, showToast]);
 
   useEffect(() => {
     loadData();
@@ -139,7 +139,7 @@ export default function TeamsPage({ currentUser, showToast }) {
   const addPlayer = async (p) => {
     const newPlayer = { ...p, id: uid() };
     try {
-      await api.addTeamPlayer(activeTeam, newPlayer);
+      await api.addTeamPlayer(compId, activeTeam, newPlayer);
       setPlayers(prev => ({ ...prev, [activeTeam]: [...prev[activeTeam], newPlayer] }));
       setShowAddPlayer(false);
       showToast(`${p.name} added to ${teamName}!`);
@@ -151,7 +151,7 @@ export default function TeamsPage({ currentUser, showToast }) {
   // Save edit
   const saveEdit = async (p) => {
     try {
-      await api.updateTeamPlayer(activeTeam, p.id, p);
+      await api.updateTeamPlayer(compId, activeTeam, p.id, p);
       setPlayers(prev => ({ ...prev, [activeTeam]: prev[activeTeam].map(x => x.id === p.id ? p : x) }));
       setEditPlayer(null);
       showToast('Player updated!');
@@ -164,7 +164,7 @@ export default function TeamsPage({ currentUser, showToast }) {
   const removePlayer = async (id) => {
     if (!window.confirm('Remove this player?')) return;
     try {
-      await api.deleteTeamPlayer(activeTeam, id);
+      await api.deleteTeamPlayer(compId, activeTeam, id);
       setPlayers(prev => ({ ...prev, [activeTeam]: prev[activeTeam].filter(p => p.id !== id) }));
       showToast('Player removed');
     } catch (e) {
@@ -176,7 +176,7 @@ export default function TeamsPage({ currentUser, showToast }) {
   const doSubstitute = async ({ oldId, oldEndDate, newPlayer }) => {
     try {
       const newPlayerWithId = { ...newPlayer, id: uid() };
-      const res = await api.substitutePlayer(activeTeam, {
+      const res = await api.substitutePlayer(compId, activeTeam, {
         oldPlayerId: oldId,
         oldEndDate: oldEndDate,
         newPlayer: newPlayerWithId
@@ -204,7 +204,7 @@ export default function TeamsPage({ currentUser, showToast }) {
     if (!f) return;
     parseExcel(f, async (newPlayers) => {
       try {
-        await api.bulkImportPlayers(activeTeam, newPlayers);
+        await api.bulkImportPlayers(compId, activeTeam, newPlayers);
         setPlayers(prev => ({ ...prev, [activeTeam]: [...prev[activeTeam], ...newPlayers] }));
         showToast(`${newPlayers.length} players imported!`);
       } catch (err) {

@@ -164,7 +164,7 @@ function MatchEditModal({ initial, onSave, onClose }) {
    MatchDetailModal — the full scorecard viewer/editor.
    Shows per-player runs, wickets, points for each team.
    ──────────────────────────────────────────────────── */
-export default function MatchDetailModal({ match, matchPoints, teams, settings, onClose, onSave, onRefreshAPI, onRefreshClaude, refreshingId, refreshingMode, currentUser }) {
+export default function MatchDetailModal({ match, matchPoints, teams, settings, compId, onClose, onSave, onRefreshAPI, onRefreshClaude, refreshingId, refreshingMode, currentUser }) {
   const mp = matchPoints[match.id] || {};
 
   // Deep-copy player arrays for editing
@@ -239,7 +239,7 @@ export default function MatchDetailModal({ match, matchPoints, teams, settings, 
       lastRefreshed: new Date().toISOString(),
     };
     try {
-      await api.updateMatchPoints(match.id, newPoints);
+      await api.updateMatchPoints(compId, match.id, newPoints);
       onSave(match.id, newPoints);
       setDirty(false);
     } catch (e) {

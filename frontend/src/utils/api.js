@@ -11,45 +11,50 @@ export const api = {
   deleteUser: (userId) => axios.delete(`${API_BASE}/auth/users/${userId}`),
   changePassword: (userId, newPassword) => axios.post(`${API_BASE}/auth/change-password`, { userId, newPassword }),
   
-  // Players
+  // Players (shared)
   getPlayers: () => axios.get(`${API_BASE}/players`),
   createPlayer: (player) => axios.post(`${API_BASE}/players`, player),
   updatePlayer: (playerId, player) => axios.put(`${API_BASE}/players/${playerId}`, player),
   deletePlayer: (playerId) => axios.delete(`${API_BASE}/players/${playerId}`),
-  fetchPlayersFromWeb: () => axios.post(`${API_BASE}/players/fetch-from-web`),
   
-  // Teams
-  getTeams: () => axios.get(`${API_BASE}/teams`),
-  addTeamPlayer: (teamId, player) => axios.post(`${API_BASE}/teams/${teamId}/players`, player),
-  updateTeamPlayer: (teamId, playerId, player) => axios.put(`${API_BASE}/teams/${teamId}/players/${playerId}`, player),
-  deleteTeamPlayer: (teamId, playerId) => axios.delete(`${API_BASE}/teams/${teamId}/players/${playerId}`),
-  substitutePlayer: (teamId, data) => axios.post(`${API_BASE}/teams/${teamId}/substitute`, data),
-  getSubstitutions: () => axios.get(`${API_BASE}/teams/substitutions`),
-  bulkImportPlayers: (teamId, players) => axios.post(`${API_BASE}/teams/bulk-import/${teamId}`, players),
-  
-  // Matches
+  // Matches (shared)
   getMatches: () => axios.get(`${API_BASE}/matches`),
   createMatch: (match) => axios.post(`${API_BASE}/matches`, match),
   updateMatch: (matchId, match) => axios.put(`${API_BASE}/matches/${matchId}`, match),
-  setCricketDataId: (matchId, cricketDataId) => axios.post(`${API_BASE}/matches/set-cricket-data-id`, { matchId, cricketDataId }),
   
-  // Match Points
-  getAllMatchPoints: () => axios.get(`${API_BASE}/match-points`),
-  getMatchPoints: (matchId) => axios.get(`${API_BASE}/match-points/${matchId}`),
-  updateMatchPoints: (matchId, points) => axios.put(`${API_BASE}/match-points/${matchId}`, points),
+  // Competitions
+  getCompetitions: () => axios.get(`${API_BASE}/competitions`),
+  getCompetition: (compId) => axios.get(`${API_BASE}/competitions/${compId}`),
+  createCompetition: (data) => axios.post(`${API_BASE}/competitions`, data),
+  updateCompetition: (compId, data) => axios.put(`${API_BASE}/competitions/${compId}`, data),
+  deleteCompetition: (compId) => axios.delete(`${API_BASE}/competitions/${compId}`),
   
-  // Scores
-  refreshScoreAPI: (matchId) => axios.post(`${API_BASE}/scores/refresh-api`, { matchId }),
-  refreshScoreClaude: (matchId) => axios.post(`${API_BASE}/scores/refresh-claude`, { matchId }),
+  // Active competition
+  getActiveCompetitionId: () => axios.get(`${API_BASE}/active-competition`),
+  setActiveCompetitionId: (id) => axios.put(`${API_BASE}/active-competition`, { activeCompetitionId: id }),
   
-  // Settings
-  getSettings: () => axios.get(`${API_BASE}/settings`),
-  updateSettings: (settings) => axios.put(`${API_BASE}/settings`, settings),
+  // Competition-scoped: Teams
+  getTeams: (compId) => axios.get(`${API_BASE}/competitions/${compId}/teams`),
+  addTeamPlayer: (compId, teamId, player) => axios.post(`${API_BASE}/competitions/${compId}/teams/${teamId}/players`, player),
+  updateTeamPlayer: (compId, teamId, playerId, player) => axios.put(`${API_BASE}/competitions/${compId}/teams/${teamId}/players/${playerId}`, player),
+  deleteTeamPlayer: (compId, teamId, playerId) => axios.delete(`${API_BASE}/competitions/${compId}/teams/${teamId}/players/${playerId}`),
+  substitutePlayer: (compId, teamId, data) => axios.post(`${API_BASE}/competitions/${compId}/teams/${teamId}/substitute`, data),
+  getSubstitutions: (compId) => axios.get(`${API_BASE}/competitions/${compId}/substitutions`),
+  bulkImportPlayers: (compId, teamId, players) => axios.post(`${API_BASE}/competitions/${compId}/teams/bulk-import/${teamId}`, players),
+  
+  // Competition-scoped: Match Points
+  getAllMatchPoints: (compId) => axios.get(`${API_BASE}/competitions/${compId}/match-points`),
+  updateMatchPoints: (compId, matchId, points) => axios.put(`${API_BASE}/competitions/${compId}/match-points/${matchId}`, points),
+  
+  // Competition-scoped: Scores
+  refreshScoreAPI: (compId, matchId) => axios.post(`${API_BASE}/competitions/${compId}/scores/refresh-api`, { matchId }),
+  refreshScoreClaude: (compId, matchId) => axios.post(`${API_BASE}/competitions/${compId}/scores/refresh-claude`, { matchId }),
+  
+  // Competition-scoped: Settings
+  getSettings: (compId) => axios.get(`${API_BASE}/competitions/${compId}/settings`),
+  updateSettings: (compId, settings) => axios.put(`${API_BASE}/competitions/${compId}/settings`, settings),
   
   // Backup
   exportBackup: () => axios.get(`${API_BASE}/backup/export`),
   importBackup: (data) => axios.post(`${API_BASE}/backup/import`, data),
-  
-  // Analytics
-  getAnalytics: (teamId) => axios.get(`${API_BASE}/analytics/${teamId}`)
 };

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../utils/api';
 
-export default function SettingsPage({ currentUser, showToast, onDataRefresh }) {
+export default function SettingsPage({ compId, currentUser, showToast, onDataRefresh }) {
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const importRef = useRef();
@@ -10,14 +10,14 @@ export default function SettingsPage({ currentUser, showToast, onDataRefresh }) 
 
   const loadSettings = useCallback(async () => {
     try {
-      const res = await api.getSettings();
+      const res = await api.getSettings(compId);
       setSettings(res.data);
       setLoading(false);
     } catch (e) {
       showToast('Failed to load settings', 'error');
       setLoading(false);
     }
-  }, [showToast]);
+  }, [compId, showToast]);
 
   useEffect(() => {
     loadSettings();
@@ -25,7 +25,7 @@ export default function SettingsPage({ currentUser, showToast, onDataRefresh }) 
 
   const saveSettings = async () => {
     try {
-      await api.updateSettings(settings);
+      await api.updateSettings(compId, settings);
       showToast('Settings saved!');
     } catch (e) {
       showToast('Failed to save settings', 'error');

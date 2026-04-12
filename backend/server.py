@@ -11,107 +11,29 @@ import hashlib
 from datetime import datetime
 import anthropic
 import httpx
+import re
+import json
+import copy
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# API Keys
-ANTHROPIC_API_KEY = os.environ['ANTHROPIC_API_KEY']
-CRICKETDATA_API_KEY = os.environ['CRICKETDATA_API_KEY']
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+CRICKETDATA_API_KEY = os.environ.get('CRICKETDATA_API_KEY', '')
 CRICKETDATA_BASE = "https://api.cricapi.com/v1"
 
-# Create the main app
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-# ─── MODELS ──────────────────────────────────────────────────────────────────
+# ─── LOGGING ──────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class User(BaseModel):
-    id: str
-    username: str
-    passwordHash: str
-    role: str  # "admin" | "edit" | "read-only"
-    editPerms: List[str] = []
-
-class UserCreate(BaseModel):
-    username: str
-    password: str
-    role: str
-    editPerms: List[str] = []
-
-class UserUpdate(BaseModel):
-    username: Optional[str] = None
-    role: Optional[str] = None
-    editPerms: Optional[List[str]] = None
-
-class PasswordChange(BaseModel):
-    userId: str
-    newPassword: str
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-class Player(BaseModel):
-    id: str
-    name: str
-    franchise: str
-    role: str
-
-class TeamPlayer(BaseModel):
-    id: str
-    name: str
-    franchise: str
-    role: str
-    effectiveDate: Optional[str] = None
-    endDate: Optional[str] = None
-    subInNumber: Optional[int] = None
-    subOutNumber: Optional[int] = None
-
-class SubstituteRequest(BaseModel):
-    oldPlayerId: str
-    oldEndDate: str
-    newPlayer: TeamPlayer
-
-class Match(BaseModel):
-    id: str
-    no: Any  # can be int or string like "Q1", "Final"
-    date: str
-    t1: str
-    t2: str
-    venue: str
-    cricketDataId: Optional[str] = None
-
-class MatchPlayerStats(BaseModel):
-    id: str
-    name: str
-    franchise: str
-    role: str
-    runs: int = 0
-    wickets: int = 0
-    points: int = 0
-    active: bool = True
-    scraped: bool = False
-    manual: bool = False
-
-class TeamMatchPoints(BaseModel):
-    players: List[MatchPlayerStats]
-    total: int = 0
-    adjustment: int = 0
-
-class MatchPoints(BaseModel):
-    matchId: str
-    teamA: Optional[TeamMatchPoints] = None
-    teamB: Optional[TeamMatchPoints] = None
-    found: bool = False
-    source: Optional[str] = None  # "api" | "claude"
-    lastRefreshed: Optional[str] = None
-    error: Optional[str] = None
+# ─── MODELS ───────────────────────────────────────────────────────────────────
 
 class ScoringRules(BaseModel):
     runPoints: int = 1
@@ -121,793 +43,470 @@ class ScoringRules(BaseModel):
     bonus50to99Runs: int = 10
     bonus100PlusRuns: int = 20
 
-class Settings(BaseModel):
-    teamAName: str = "Ankur"
-    teamBName: str = "Sarawat"
-    maxSubstitutions: int = 8
-    scoring: ScoringRules = Field(default_factory=ScoringRules)
+DEFAULT_SCORING = ScoringRules().dict()
 
-class RefreshScoreRequest(BaseModel):
-    matchId: str
+def make_default_competition(overrides=None):
+    comp = {
+        "id": f"comp_{datetime.now().timestamp()}",
+        "name": "IPL 2026",
+        "teamAName": "Ankur",
+        "teamBName": "Sarawat",
+        "maxSubstitutions": 8,
+        "scoring": DEFAULT_SCORING,
+        "players": {"teamA": [], "teamB": []},
+        "subs": {"teamA": 0, "teamB": 0},
+        "matchPoints": {},
+    }
+    if overrides:
+        comp.update(overrides)
+    return comp
 
-class SetCricketDataIdRequest(BaseModel):
-    matchId: str
-    cricketDataId: str
-
-# ─── HELPER FUNCTIONS ────────────────────────────────────────────────────────
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 def sha256(text: str) -> str:
-    """Generate SHA-256 hash"""
     return hashlib.sha256(text.encode()).hexdigest()
 
-def calc_points(runs: int, wickets: int, scoring: ScoringRules) -> int:
-    """Calculate fantasy points"""
-    pts = runs * scoring.runPoints + wickets * scoring.wicketPoints
-    if runs >= 100:
-        pts += scoring.bonus100PlusRuns
-    elif runs >= 50:
-        pts += scoring.bonus50to99Runs
-    if wickets >= 5:
-        pts += scoring.bonus5PlusWickets
-    elif wickets >= 3:
-        pts += scoring.bonus34Wickets
+def calc_points(runs: int, wickets: int, scoring: dict) -> int:
+    pts = runs * scoring.get("runPoints", 1) + wickets * scoring.get("wicketPoints", 20)
+    if runs >= 100: pts += scoring.get("bonus100PlusRuns", 20)
+    elif runs >= 50: pts += scoring.get("bonus50to99Runs", 10)
+    if wickets >= 5: pts += scoring.get("bonus5PlusWickets", 20)
+    elif wickets >= 3: pts += scoring.get("bonus34Wickets", 10)
     return pts
 
 def name_similarity(a: str, b: str) -> float:
-    """Calculate name similarity score 0-1"""
-    if not a or not b:
-        return 0
-    
-    import re
+    if not a or not b: return 0
     norm = lambda s: re.sub(r'[^a-z\s]', '', s.lower()).strip()
     na, nb = norm(a), norm(b)
-    
-    if na == nb:
-        return 1.0
-    
-    ap = na.split()
-    bp = nb.split()
-    if not ap or not bp:
-        return 0
-    
-    aFirst, bFirst = ap[0], bp[0]
-    aLast, bLast = ap[-1], bp[-1]
-    
-    # Both first AND last match
-    if aFirst == bFirst and aLast == bLast:
-        return 0.97
-    
-    # Last name + first initial
-    if aLast == bLast and len(aLast) > 3 and aFirst[0] == bFirst[0]:
-        return 0.88
-    
-    # Containment
-    if na in nb or nb in na:
-        return 0.75
-    
-    # Last name only
-    if aLast == bLast and len(aLast) > 4:
-        return 0.50
-    
-    # First name only
-    if aFirst == bFirst and len(aFirst) > 4:
-        return 0.45
-    
+    if na == nb: return 1.0
+    ap, bp = na.split(), nb.split()
+    if not ap or not bp: return 0
+    aF, bF, aL, bL = ap[0], bp[0], ap[-1], bp[-1]
+    if aF == bF and aL == bL: return 0.97
+    if aL == bL and len(aL) > 3 and aF[0] == bF[0]: return 0.88
+    if na in nb or nb in na: return 0.75
+    if aL == bL and len(aL) > 4: return 0.50
+    if aF == bF and len(aF) > 4: return 0.45
     return 0
 
-def best_scorecard_match(playerName: str, scorecardPlayers: List[Dict]):
-    """Find best matching player in scorecard"""
-    threshold = 0.50
-    scored = [
-        {"sp": sp, "score": name_similarity(sp.get("name", ""), playerName)}
-        for sp in scorecardPlayers
-    ]
-    scored = [x for x in scored if x["score"] >= threshold]
+def best_scorecard_match(playerName, scorecardPlayers):
+    scored = [{"sp": sp, "score": name_similarity(sp.get("name", ""), playerName)} for sp in scorecardPlayers]
+    scored = [x for x in scored if x["score"] >= 0.50]
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[0] if scored else None
 
-# ─── AUTH ENDPOINTS ──────────────────────────────────────────────────────────
+def clean_doc(doc):
+    if isinstance(doc, dict):
+        return {k: v for k, v in doc.items() if k != '_id'}
+    return doc
 
-@api_router.post("/auth/login")
-async def login(request: LoginRequest):
-    """User login"""
-    password_hash = sha256(request.password)
-    user = await db.users.find_one(
-        {"username": request.username, "passwordHash": password_hash},
-        {"_id": 0}
-    )
-    
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    return user
+def clean_docs(docs):
+    if isinstance(docs, list):
+        return [clean_doc(d) for d in docs if isinstance(d, dict)]
+    return clean_doc(docs) if isinstance(docs, dict) else docs
+
+# ─── AUTH ─────────────────────────────────────────────────────────────────────
 
 @api_router.get("/auth/users")
 async def get_users():
-    """Get all users"""
-    users = await db.users.find({}, {"_id": 0}).to_list(1000)
-    return users
+    return await db.users.find({}, {"_id": 0}).to_list(1000)
+
+@api_router.post("/auth/login")
+async def login(data: Dict[str, Any] = Body(...)):
+    h = sha256(data["password"])
+    user = await db.users.find_one({"username": data["username"], "passwordHash": h}, {"_id": 0})
+    if not user: raise HTTPException(status_code=401, detail="Invalid credentials")
+    return user
 
 @api_router.post("/auth/users")
-async def create_user(user: UserCreate):
-    """Create new user"""
-    # Check if username exists
-    existing = await db.users.find_one({"username": user.username})
-    if existing:
-        raise HTTPException(status_code=400, detail="Username already exists")
-    
-    user_id = f"u_{datetime.now().timestamp()}"
-    new_user = {
-        "id": user_id,
-        "username": user.username,
-        "passwordHash": sha256(user.password),
-        "role": user.role,
-        "editPerms": user.editPerms if user.role == "edit" else []
-    }
-    
-    await db.users.insert_one(new_user)
-    new_user.pop("_id", None)
-    return new_user
+async def create_user(data: Dict[str, Any] = Body(...)):
+    if await db.users.find_one({"username": data["username"]}):
+        raise HTTPException(status_code=400, detail="Username exists")
+    user = {"id": f"u_{datetime.now().timestamp()}", "username": data["username"],
+            "passwordHash": sha256(data["password"]), "role": data.get("role", "read-only"),
+            "editPerms": data.get("editPerms", [])}
+    await db.users.insert_one(user)
+    user.pop("_id", None)
+    return user
 
 @api_router.put("/auth/users/{user_id}")
-async def update_user(user_id: str, update: UserUpdate):
-    """Update user"""
-    update_data = {k: v for k, v in update.dict().items() if v is not None}
-    
-    if update_data:
-        await db.users.update_one({"id": user_id}, {"$set": update_data})
-    
-    updated_user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    return updated_user
+async def update_user(user_id: str, data: Dict[str, Any] = Body(...)):
+    update = {k: v for k, v in data.items() if v is not None and k != '_id'}
+    if update: await db.users.update_one({"id": user_id}, {"$set": update})
+    return await db.users.find_one({"id": user_id}, {"_id": 0})
 
 @api_router.delete("/auth/users/{user_id}")
 async def delete_user(user_id: str):
-    """Delete user"""
     await db.users.delete_one({"id": user_id})
     return {"success": True}
 
 @api_router.post("/auth/change-password")
-async def change_password(request: PasswordChange):
-    """Change user password"""
-    new_hash = sha256(request.newPassword)
-    await db.users.update_one(
-        {"id": request.userId},
-        {"$set": {"passwordHash": new_hash}}
-    )
+async def change_password(data: Dict[str, Any] = Body(...)):
+    await db.users.update_one({"id": data["userId"]}, {"$set": {"passwordHash": sha256(data["newPassword"])}})
     return {"success": True}
 
-# ─── PLAYER ENDPOINTS ────────────────────────────────────────────────────────
+# ─── PLAYERS (shared master list) ─────────────────────────────────────────────
 
 @api_router.get("/players")
 async def get_players():
-    """Get all players from master list"""
-    players = await db.players.find({}, {"_id": 0}).to_list(10000)
-    return players
+    return await db.players.find({}, {"_id": 0}).to_list(10000)
 
 @api_router.post("/players")
-async def create_player(player: Player):
-    """Add player to master list"""
-    await db.players.insert_one(player.dict())
-    return player
+async def create_player(data: Dict[str, Any] = Body(...)):
+    await db.players.insert_one(data)
+    return clean_doc(data)
 
 @api_router.put("/players/{player_id}")
-async def update_player(player_id: str, player: Player):
-    """Update player in master list"""
-    await db.players.update_one({"id": player_id}, {"$set": player.dict()})
-    return player
+async def update_player(player_id: str, data: Dict[str, Any] = Body(...)):
+    await db.players.update_one({"id": player_id}, {"$set": clean_doc(data)})
+    return clean_doc(data)
 
 @api_router.delete("/players/{player_id}")
 async def delete_player(player_id: str):
-    """Delete player from master list"""
     await db.players.delete_one({"id": player_id})
     return {"success": True}
 
-@api_router.post("/players/fetch-from-web")
-async def fetch_players_from_web():
-    """Fetch IPL 2026 squads using Claude AI"""
-    prompt = """Search espncricinfo.com or cricbuzz.com for the complete IPL 2026 squad lists for all 10 teams (CSK, DC, GT, KKR, LSG, MI, PBKS, RCB, RR, SRH).
-For each player include their role: Batsman, Bowler, All-rounder, or Wicket-keeper.
-Return ONLY valid JSON (no markdown, no explanation):
-{"players":[{"name":"Full Name","franchise":"TEAM_CODE","role":"Role"}]}
-Include ALL players from all 10 squads. franchise must be one of: CSK,DC,GT,KKR,LSG,MI,PBKS,RCB,RR,SRH"""
-    
-    try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        
-        messages = [{"role": "user", "content": prompt}]
-        
-        for i in range(8):
-            response = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=8000,
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                messages=messages
-            )
-            
-            text_blocks = [b.text for b in response.content if hasattr(b, 'text')]
-            tool_blocks = [b for b in response.content if hasattr(b, 'type') and b.type == 'tool_use']
-            
-            if response.stop_reason == "end_turn" or not tool_blocks:
-                text = "".join(text_blocks)
-                # Extract JSON
-                import re
-                text = re.sub(r'```json|```', '', text).strip()
-                match = re.search(r'\{[\s\S]*\}', text)
-                if match:
-                    import json
-                    data = json.loads(match.group(0))
-                    if "players" in data:
-                        return {"players": data["players"]}
-                return {"players": []}
-            
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": t.id, "content": ""} for t in tool_blocks]
-            })
-        
-        return {"players": []}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ─── TEAM ENDPOINTS ──────────────────────────────────────────────────────────
-
-@api_router.get("/teams")
-async def get_teams():
-    """Get both teams with their players"""
-    teams = await db.teams.find_one({}, {"_id": 0})
-    if not teams:
-        teams = {"teamA": [], "teamB": []}
-    # Ensure both keys exist
-    teams.setdefault("teamA", [])
-    teams.setdefault("teamB", [])
-    return teams
-
-@api_router.post("/teams/{team_id}/players")
-async def add_team_player(team_id: str, player: TeamPlayer):
-    """Add player to team"""
-    teams = await db.teams.find_one({}, {"_id": 0}) or {"teamA": [], "teamB": []}
-    teams[team_id].append(player.dict())
-    await db.teams.update_one({}, {"$set": teams}, upsert=True)
-    return player
-
-@api_router.put("/teams/{team_id}/players/{player_id}")
-async def update_team_player(team_id: str, player_id: str, player: TeamPlayer):
-    """Update player in team"""
-    teams = await db.teams.find_one({}, {"_id": 0})
-    for i, p in enumerate(teams[team_id]):
-        if p["id"] == player_id:
-            teams[team_id][i] = player.dict()
-            break
-    await db.teams.update_one({}, {"$set": teams})
-    return player
-
-@api_router.delete("/teams/{team_id}/players/{player_id}")
-async def delete_team_player(team_id: str, player_id: str):
-    """Remove player from team"""
-    teams = await db.teams.find_one({}, {"_id": 0})
-    teams[team_id] = [p for p in teams[team_id] if p["id"] != player_id]
-    await db.teams.update_one({}, {"$set": teams})
-    return {"success": True}
-
-@api_router.post("/teams/{team_id}/substitute")
-async def substitute_player(team_id: str, request: SubstituteRequest):
-    """Substitute a player"""
-    teams = await db.teams.find_one({}, {"_id": 0})
-    subs = await db.substitutions.find_one({}, {"_id": 0}) or {"teamA": 0, "teamB": 0}
-    
-    sub_number = subs[team_id] + 1
-    
-    # Update old player
-    for i, p in enumerate(teams[team_id]):
-        if p["id"] == request.oldPlayerId:
-            teams[team_id][i]["endDate"] = request.oldEndDate
-            teams[team_id][i]["subOutNumber"] = sub_number
-            break
-    
-    # Add new player
-    new_player_dict = request.newPlayer.dict()
-    new_player_dict["subInNumber"] = sub_number
-    teams[team_id].append(new_player_dict)
-    
-    # Update substitution count
-    subs[team_id] = sub_number
-    
-    await db.teams.update_one({}, {"$set": teams}, upsert=True)
-    await db.substitutions.update_one({}, {"$set": subs}, upsert=True)
-    
-    return {"success": True, "subNumber": sub_number}
-
-@api_router.get("/teams/substitutions")
-async def get_substitutions():
-    """Get substitution counts"""
-    subs = await db.substitutions.find_one({}, {"_id": 0})
-    if not subs:
-        subs = {"teamA": 0, "teamB": 0}
-    return subs
-
-@api_router.post("/teams/bulk-import/{team_id}")
-async def bulk_import_players(team_id: str, players: List[TeamPlayer]):
-    """Bulk import players to team"""
-    teams = await db.teams.find_one({}, {"_id": 0}) or {"teamA": [], "teamB": []}
-    teams[team_id].extend([p.dict() for p in players])
-    await db.teams.update_one({}, {"$set": teams}, upsert=True)
-    return {"success": True, "count": len(players)}
-
-# ─── MATCH ENDPOINTS ─────────────────────────────────────────────────────────
+# ─── MATCHES (shared schedule) ────────────────────────────────────────────────
 
 @api_router.get("/matches")
 async def get_matches():
-    """Get all matches"""
-    matches = await db.matches.find({}, {"_id": 0}).to_list(1000)
-    return matches
+    return await db.matches.find({}, {"_id": 0}).to_list(1000)
 
 @api_router.post("/matches")
-async def create_match(match: Match):
-    """Create new match"""
-    await db.matches.insert_one(match.dict())
-    return match
+async def create_match(data: Dict[str, Any] = Body(...)):
+    await db.matches.insert_one(data)
+    return clean_doc(data)
 
 @api_router.put("/matches/{match_id}")
-async def update_match(match_id: str, match: Match):
-    """Update match"""
-    await db.matches.update_one({"id": match_id}, {"$set": match.dict()})
-    return match
+async def update_match(match_id: str, data: Dict[str, Any] = Body(...)):
+    await db.matches.update_one({"id": match_id}, {"$set": clean_doc(data)})
+    return clean_doc(data)
 
-@api_router.post("/matches/set-cricket-data-id")
-async def set_cricket_data_id(request: SetCricketDataIdRequest):
-    """Set CricketData match ID"""
-    await db.matches.update_one(
-        {"id": request.matchId},
-        {"$set": {"cricketDataId": request.cricketDataId}}
-    )
+# ─── COMPETITIONS ─────────────────────────────────────────────────────────────
+
+@api_router.get("/competitions")
+async def get_competitions():
+    comps = await db.competitions.find({}, {"_id": 0}).to_list(100)
+    return comps
+
+@api_router.get("/competitions/{comp_id}")
+async def get_competition(comp_id: str):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    if not comp: raise HTTPException(status_code=404, detail="Competition not found")
+    return comp
+
+@api_router.post("/competitions")
+async def create_competition(data: Dict[str, Any] = Body(...)):
+    comp = make_default_competition(data)
+    await db.competitions.insert_one(comp)
+    return clean_doc(comp)
+
+@api_router.put("/competitions/{comp_id}")
+async def update_competition(comp_id: str, data: Dict[str, Any] = Body(...)):
+    update = clean_doc(data)
+    update.pop("id", None)  # don't overwrite id
+    await db.competitions.update_one({"id": comp_id}, {"$set": update})
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    return comp
+
+@api_router.delete("/competitions/{comp_id}")
+async def delete_competition(comp_id: str):
+    await db.competitions.delete_one({"id": comp_id})
     return {"success": True}
 
-# ─── MATCH POINTS ENDPOINTS ──────────────────────────────────────────────────
+# ─── COMPETITION-SCOPED: TEAMS ────────────────────────────────────────────────
 
-@api_router.get("/match-points")
-async def get_all_match_points():
-    """Get all match points"""
-    points = await db.match_points.find({}, {"_id": 0}).to_list(1000)
-    result = {}
-    for p in points:
-        mid = p.get("matchId")
-        if mid:
-            result[mid] = p
-    return result
+@api_router.get("/competitions/{comp_id}/teams")
+async def get_comp_teams(comp_id: str):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    if not comp: raise HTTPException(status_code=404)
+    return comp.get("players", {"teamA": [], "teamB": []})
 
-@api_router.get("/match-points/{match_id}")
-async def get_match_points(match_id: str):
-    """Get points for specific match"""
-    points = await db.match_points.find_one({"matchId": match_id}, {"_id": 0})
-    return points or {}
+@api_router.post("/competitions/{comp_id}/teams/{team_id}/players")
+async def add_comp_team_player(comp_id: str, team_id: str, data: Dict[str, Any] = Body(...)):
+    await db.competitions.update_one({"id": comp_id}, {"$push": {f"players.{team_id}": clean_doc(data)}})
+    return data
 
-@api_router.put("/match-points/{match_id}")
-async def update_match_points(match_id: str, points: MatchPoints):
-    """Update match points"""
-    await db.match_points.update_one(
-        {"matchId": match_id},
-        {"$set": points.dict()},
-        upsert=True
-    )
-    return points
+@api_router.put("/competitions/{comp_id}/teams/{team_id}/players/{player_id}")
+async def update_comp_team_player(comp_id: str, team_id: str, player_id: str, data: Dict[str, Any] = Body(...)):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    players = comp.get("players", {}).get(team_id, [])
+    for i, p in enumerate(players):
+        if p.get("id") == player_id:
+            players[i] = clean_doc(data)
+            break
+    await db.competitions.update_one({"id": comp_id}, {"$set": {f"players.{team_id}": players}})
+    return data
 
-# ─── SCORE REFRESH ENDPOINTS ─────────────────────────────────────────────────
+@api_router.delete("/competitions/{comp_id}/teams/{team_id}/players/{player_id}")
+async def delete_comp_team_player(comp_id: str, team_id: str, player_id: str):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    players = [p for p in comp.get("players", {}).get(team_id, []) if p.get("id") != player_id]
+    await db.competitions.update_one({"id": comp_id}, {"$set": {f"players.{team_id}": players}})
+    return {"success": True}
 
-@api_router.post("/scores/refresh-api")
-async def refresh_score_api(request: RefreshScoreRequest):
-    """Refresh match score using CricketData API"""
-    match = await db.matches.find_one({"id": request.matchId}, {"_id": 0})
-    if not match:
-        raise HTTPException(status_code=404, detail="Match not found")
-    
-    teams = await db.teams.find_one({}, {"_id": 0})
-    settings = await db.settings.find_one({}, {"_id": 0})
-    
-    try:
-        # Fetch scorecard from CricketData API
-        match_id = match.get("cricketDataId")
-        
-        if match_id:
-            # Direct scorecard fetch
-            url = f"{CRICKETDATA_BASE}/match_scorecard?apikey={CRICKETDATA_API_KEY}&id={match_id}"
-        else:
-            # Find match first
-            url = f"{CRICKETDATA_BASE}/matches?apikey={CRICKETDATA_API_KEY}&offset=0"
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            data = response.json()
-        
-        # Process scorecard (simplified - would need actual parsing logic)
-        # For now, return structure
-        return {
-            "success": True,
-            "found": False,
-            "matchId": request.matchId,
-            "message": "API integration ready - scorecard parsing to be implemented"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@api_router.post("/competitions/{comp_id}/teams/{team_id}/substitute")
+async def substitute_comp_player(comp_id: str, team_id: str, data: Dict[str, Any] = Body(...)):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    players = comp.get("players", {}).get(team_id, [])
+    subs = comp.get("subs", {"teamA": 0, "teamB": 0})
+    sub_number = subs.get(team_id, 0) + 1
+    for i, p in enumerate(players):
+        if p.get("id") == data["oldPlayerId"]:
+            players[i]["endDate"] = data["oldEndDate"]
+            players[i]["subOutNumber"] = sub_number
+            break
+    new_player = clean_doc(data["newPlayer"])
+    new_player["subInNumber"] = sub_number
+    players.append(new_player)
+    subs[team_id] = sub_number
+    await db.competitions.update_one({"id": comp_id}, {"$set": {f"players.{team_id}": players, "subs": subs}})
+    return {"success": True, "subNumber": sub_number}
 
-@api_router.post("/scores/refresh-claude")
-async def refresh_score_claude(request: RefreshScoreRequest):
-    """Refresh match score using Claude AI web search"""
-    match = await db.matches.find_one({"id": request.matchId}, {"_id": 0})
-    if not match:
-        raise HTTPException(status_code=404, detail="Match not found")
-    
-    teams = await db.teams.find_one({}, {"_id": 0})
-    settings = await db.settings.find_one({}, {"_id": 0}) or {"scoring": {}}
-    
+@api_router.get("/competitions/{comp_id}/substitutions")
+async def get_comp_subs(comp_id: str):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    return comp.get("subs", {"teamA": 0, "teamB": 0})
+
+@api_router.post("/competitions/{comp_id}/teams/bulk-import/{team_id}")
+async def bulk_import_comp_players(comp_id: str, team_id: str, data: List[Dict[str, Any]] = Body(...)):
+    await db.competitions.update_one({"id": comp_id}, {"$push": {f"players.{team_id}": {"$each": clean_docs(data)}}})
+    return {"success": True, "count": len(data)}
+
+# ─── COMPETITION-SCOPED: MATCH POINTS ─────────────────────────────────────────
+
+@api_router.get("/competitions/{comp_id}/match-points")
+async def get_comp_match_points(comp_id: str):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    return comp.get("matchPoints", {})
+
+@api_router.put("/competitions/{comp_id}/match-points/{match_id}")
+async def update_comp_match_points(comp_id: str, match_id: str, data: Dict[str, Any] = Body(...)):
+    await db.competitions.update_one({"id": comp_id}, {"$set": {f"matchPoints.{match_id}": clean_doc(data)}})
+    return data
+
+# ─── COMPETITION-SCOPED: SETTINGS (read from competition itself) ──────────────
+
+@api_router.get("/competitions/{comp_id}/settings")
+async def get_comp_settings(comp_id: str):
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    if not comp: raise HTTPException(status_code=404)
+    return {
+        "teamAName": comp.get("teamAName", "Team A"),
+        "teamBName": comp.get("teamBName", "Team B"),
+        "maxSubstitutions": comp.get("maxSubstitutions", 8),
+        "scoring": comp.get("scoring", DEFAULT_SCORING),
+    }
+
+@api_router.put("/competitions/{comp_id}/settings")
+async def update_comp_settings(comp_id: str, data: Dict[str, Any] = Body(...)):
+    update = {}
+    for k in ["teamAName", "teamBName", "maxSubstitutions", "scoring"]:
+        if k in data: update[k] = data[k]
+    if update:
+        await db.competitions.update_one({"id": comp_id}, {"$set": update})
+    return data
+
+# ─── SCORE REFRESH (applies to a specific competition) ────────────────────────
+
+@api_router.post("/competitions/{comp_id}/scores/refresh-claude")
+async def refresh_comp_score_claude(comp_id: str, data: Dict[str, Any] = Body(...)):
+    match_id = data["matchId"]
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match: raise HTTPException(status_code=404, detail="Match not found")
+    comp = await db.competitions.find_one({"id": comp_id}, {"_id": 0})
+    if not comp: raise HTTPException(status_code=404, detail="Competition not found")
+
     prompt = f"""Search cricbuzz.com or espncricinfo.com for the IPL 2026 scorecard: {match['t1']} vs {match['t2']} on {match['date']}.
 Return ONLY valid JSON, no markdown:
 {{"found":true,"players":[{{"name":"Full Name","franchise":"CODE","runs":0,"wickets":0}}]}}
 Rules: include all batsmen (runs) and bowlers (wickets). Merge if player did both. Franchise codes: CSK DC GT KKR LSG MI PBKS RCB RR SRH.
 If match not done yet: {{"found":false,"players":[]}}"""
-    
+
     try:
-        client_anthropic = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         messages = [{"role": "user", "content": prompt}]
-        
         for i in range(4):
-            response = client_anthropic.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1000,
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                messages=messages
-            )
-            
+            response = client_ai.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1000,
+                tools=[{"type": "web_search_20250305", "name": "web_search"}], messages=messages)
             text_blocks = [b.text for b in response.content if hasattr(b, 'text')]
             tool_blocks = [b for b in response.content if hasattr(b, 'type') and b.type == 'tool_use']
-            
             if response.stop_reason == "end_turn" or not tool_blocks:
                 text = "".join(text_blocks)
-                import re, json
                 text = re.sub(r'```json|```', '', text).strip()
                 match_json = re.search(r'\{[\s\S]*\}', text)
                 if match_json:
-                    data = json.loads(match_json.group(0))
-                    
-                    # Build match points
-                    if data.get("found"):
-                        scorecard_players = data.get("players", [])
-                        
-                        # Map players to teams
-                        teamA_players = []
-                        teamB_players = []
-                        
-                        for team_key, team_list in [("teamA", teamA_players), ("teamB", teamB_players)]:
-                            for tp in teams.get(team_key, []):
-                                # Find in scorecard
-                                found_match = best_scorecard_match(tp["name"], scorecard_players)
-                                
-                                if found_match:
-                                    sp = found_match["sp"]
-                                    runs = int(sp.get("runs", 0))
-                                    wickets = int(sp.get("wickets", 0))
-                                    points = calc_points(runs, wickets, ScoringRules(**settings.get("scoring", {})))
-                                    
-                                    team_list.append({
-                                        "id": tp["id"],
-                                        "name": tp["name"],
-                                        "franchise": tp["franchise"],
-                                        "role": tp["role"],
-                                        "runs": runs,
-                                        "wickets": wickets,
-                                        "points": points,
-                                        "active": True,
-                                        "scraped": True,
-                                        "manual": False
-                                    })
-                                else:
-                                    # Not found in scorecard
-                                    team_list.append({
-                                        "id": tp["id"],
-                                        "name": tp["name"],
-                                        "franchise": tp["franchise"],
-                                        "role": tp["role"],
-                                        "runs": 0,
-                                        "wickets": 0,
-                                        "points": 0,
-                                        "active": True,
-                                        "scraped": False,
-                                        "manual": False
-                                    })
-                        
-                        match_points = {
-                            "matchId": request.matchId,
-                            "teamA": {
-                                "players": teamA_players,
-                                "total": sum(p["points"] for p in teamA_players),
-                                "adjustment": 0
-                            },
-                            "teamB": {
-                                "players": teamB_players,
-                                "total": sum(p["points"] for p in teamB_players),
-                                "adjustment": 0
-                            },
-                            "found": True,
-                            "source": "claude",
-                            "lastRefreshed": datetime.now().isoformat()
-                        }
-                        
-                        await db.match_points.update_one(
-                            {"matchId": request.matchId},
-                            {"$set": match_points},
-                            upsert=True
-                        )
-                        
-                        return match_points
-                    else:
-                        return {"found": False, "players": []}
-                
+                    sc = json.loads(match_json.group(0))
+                    if sc.get("found"):
+                        scorecard_players = sc.get("players", [])
+                        scoring = comp.get("scoring", DEFAULT_SCORING)
+                        result = _apply_scorecard_to_comp(comp, match_id, scorecard_players, scoring, "claude")
+                        await db.competitions.update_one({"id": comp_id}, {"$set": {f"matchPoints.{match_id}": result}})
+                        return result
                 return {"found": False, "players": []}
-            
             messages.append({"role": "assistant", "content": response.content})
-            messages.append({
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": t.id, "content": ""} for t in tool_blocks]
-            })
-        
+            messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": t.id, "content": ""} for t in tool_blocks]})
         return {"found": False, "players": []}
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── SETTINGS ENDPOINTS ──────────────────────────────────────────────────────
+@api_router.post("/competitions/{comp_id}/scores/refresh-api")
+async def refresh_comp_score_api(comp_id: str, data: Dict[str, Any] = Body(...)):
+    match_id = data["matchId"]
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match: raise HTTPException(status_code=404)
+    return {"success": True, "found": False, "message": "CricketData API - no live data for future matches"}
 
-@api_router.get("/settings")
-async def get_settings():
-    """Get app settings"""
-    settings = await db.settings.find_one({}, {"_id": 0})
-    if not settings:
-        settings = Settings().dict()
-    return settings
+def _apply_scorecard_to_comp(comp, match_id, scorecard_players, scoring, source):
+    """Build matchPoints entry for a competition from raw scorecard players."""
+    teamA_players = []
+    teamB_players = []
+    for team_key, team_list in [("teamA", teamA_players), ("teamB", teamB_players)]:
+        for tp in comp.get("players", {}).get(team_key, []):
+            found = best_scorecard_match(tp["name"], scorecard_players)
+            if found:
+                sp = found["sp"]
+                runs = int(sp.get("runs", 0))
+                wickets = int(sp.get("wickets", 0))
+                points = calc_points(runs, wickets, scoring)
+                team_list.append({"id": tp["id"], "name": tp["name"], "franchise": tp["franchise"],
+                    "role": tp["role"], "runs": runs, "wickets": wickets, "points": points,
+                    "active": True, "scraped": True, "manual": False})
+            else:
+                team_list.append({"id": tp["id"], "name": tp["name"], "franchise": tp["franchise"],
+                    "role": tp["role"], "runs": 0, "wickets": 0, "points": 0,
+                    "active": True, "scraped": False, "manual": False})
+    return {
+        "matchId": match_id,
+        "teamA": {"players": teamA_players, "total": sum(p["points"] for p in teamA_players), "adjustment": 0},
+        "teamB": {"players": teamB_players, "total": sum(p["points"] for p in teamB_players), "adjustment": 0},
+        "found": True, "source": source, "lastRefreshed": datetime.now().isoformat()
+    }
 
-@api_router.put("/settings")
-async def update_settings(settings: Settings):
-    """Update app settings"""
-    await db.settings.update_one({}, {"$set": settings.dict()}, upsert=True)
-    return settings
+# ─── ACTIVE COMPETITION ID ────────────────────────────────────────────────────
 
-# ─── BACKUP ENDPOINTS ────────────────────────────────────────────────────────
+@api_router.get("/active-competition")
+async def get_active_competition_id():
+    doc = await db.app_state.find_one({"key": "activeCompetitionId"}, {"_id": 0})
+    return {"activeCompetitionId": doc["value"] if doc else None}
+
+@api_router.put("/active-competition")
+async def set_active_competition_id(data: Dict[str, Any] = Body(...)):
+    await db.app_state.update_one({"key": "activeCompetitionId"}, {"$set": {"key": "activeCompetitionId", "value": data["activeCompetitionId"]}}, upsert=True)
+    return {"success": True}
+
+# ─── BACKUP ───────────────────────────────────────────────────────────────────
 
 @api_router.get("/backup/export")
 async def export_backup():
-    """Export all data as JSON in the original JSX prototype format.
-    Keys: settings, playerMaster, teamA, teamB, subsA, subsB, matches, matchPoints, users
-    """
-    teams = await db.teams.find_one({}, {"_id": 0}) or {"teamA": [], "teamB": []}
-    subs = await db.substitutions.find_one({}, {"_id": 0}) or {"teamA": 0, "teamB": 0}
-    match_points_list = await db.match_points.find({}, {"_id": 0}).to_list(1000)
-    # Convert array to object keyed by matchId (original JSX format)
-    match_points_dict = {mp["matchId"]: mp for mp in match_points_list}
+    """Export in v2 multi-competition format, but also include v1 keys for backward compat."""
+    comps = await db.competitions.find({}, {"_id": 0}).to_list(100)
+    active_doc = await db.app_state.find_one({"key": "activeCompetitionId"}, {"_id": 0})
+    active_id = active_doc["value"] if active_doc else (comps[0]["id"] if comps else None)
+    active_comp = next((c for c in comps if c["id"] == active_id), comps[0] if comps else None)
 
-    data = {
-        "settings": await db.settings.find_one({}, {"_id": 0}) or Settings().dict(),
+    # v1 keys (backward compat with JSX prototype)
+    backup = {
+        "settings": {"teamAName": active_comp.get("teamAName", ""), "teamBName": active_comp.get("teamBName", ""),
+                      "maxSubstitutions": active_comp.get("maxSubstitutions", 8), "scoring": active_comp.get("scoring", DEFAULT_SCORING)} if active_comp else {},
         "playerMaster": await db.players.find({}, {"_id": 0}).to_list(10000),
-        "teamA": teams.get("teamA", []),
-        "teamB": teams.get("teamB", []),
-        "subsA": subs.get("teamA", 0),
-        "subsB": subs.get("teamB", 0),
+        "teamA": active_comp.get("players", {}).get("teamA", []) if active_comp else [],
+        "teamB": active_comp.get("players", {}).get("teamB", []) if active_comp else [],
+        "subsA": active_comp.get("subs", {}).get("teamA", 0) if active_comp else 0,
+        "subsB": active_comp.get("subs", {}).get("teamB", 0) if active_comp else 0,
         "matches": await db.matches.find({}, {"_id": 0}).to_list(1000),
-        "matchPoints": match_points_dict,
+        "matchPoints": active_comp.get("matchPoints", {}) if active_comp else {},
         "users": await db.users.find({}, {"_id": 0}).to_list(1000),
+        # v2 keys
+        "competitions": clean_docs(comps),
+        "activeCompetitionId": active_id,
     }
-    return data
+    return backup
 
 @api_router.post("/backup/import")
 async def import_backup(data: Dict[str, Any] = Body(...)):
-    """Import data from JSON backup.
-    Accepts BOTH original JSX format (teamA/teamB/subsA/subsB/playerMaster)
-    AND the newer API format (teams/substitutions/players).
-    """
-    import copy
-    
-    def clean_docs(docs):
-        """Remove _id fields and make deep copies to avoid mutation issues."""
-        if isinstance(docs, list):
-            return [{k: v for k, v in doc.items() if k != '_id'} for doc in docs if isinstance(doc, dict)]
-        if isinstance(docs, dict):
-            return {k: v for k, v in docs.items() if k != '_id'}
-        return docs
-    
+    """Import backup. Supports v1 (single-comp JSX) and v2 (multi-comp)."""
     try:
-        # Detect format: original JSX uses `teamA` at root, newer uses `teams`
-        is_jsx_format = "teamA" in data or "playerMaster" in data
-        logger.info(f"Importing backup. Format: {'JSX' if is_jsx_format else 'API'}. Keys: {list(data.keys())}")
+        is_v2 = "competitions" in data and isinstance(data["competitions"], list)
+        is_v1 = "teamA" in data or "playerMaster" in data
+        logger.info(f"Importing backup. Format: {'v2' if is_v2 else 'v1/JSX' if is_v1 else 'unknown'}. Keys: {list(data.keys())}")
 
-        # Users — merge with existing: import new users but preserve any existing
-        # admin that isn't in the backup (so the currently logged-in user isn't locked out)
+        # Users
         users_data = data.get("users")
         if users_data and isinstance(users_data, list) and len(users_data) > 0:
-            # Get existing users before replacing
-            existing_users = await db.users.find({}, {"_id": 0}).to_list(1000)
-            existing_by_id = {u["id"]: u for u in existing_users}
-            
-            # Build merged list: start with imported users
-            imported_by_id = {u["id"]: u for u in clean_docs(users_data)}
-            
-            # Preserve any existing admin that's NOT in the import
+            existing = await db.users.find({}, {"_id": 0}).to_list(1000)
+            existing_by_id = {u["id"]: u for u in existing}
+            imported = {u["id"]: u for u in clean_docs(users_data)}
             for uid_val, user in existing_by_id.items():
-                if uid_val not in imported_by_id and user.get("role") == "admin":
-                    imported_by_id[uid_val] = user
-            
-            # Ensure default admin always exists as fallback
-            if "admin-ankur" not in imported_by_id:
-                imported_by_id["admin-ankur"] = {
-                    "id": "admin-ankur",
-                    "username": "ankur.citm@gmail.com",
-                    "passwordHash": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
-                    "role": "admin",
-                    "editPerms": []
-                }
-            
-            merged_users = list(imported_by_id.values())
+                if uid_val not in imported and user.get("role") == "admin":
+                    imported[uid_val] = user
+            if "admin-ankur" not in imported:
+                imported["admin-ankur"] = {"id": "admin-ankur", "username": "ankur.citm@gmail.com",
+                    "passwordHash": sha256("admin"), "role": "admin", "editPerms": []}
             await db.users.delete_many({})
-            await db.users.insert_many(merged_users)
-            logger.info(f"Imported {len(merged_users)} users (merged with existing admins)")
+            await db.users.insert_many(list(imported.values()))
 
-        # Players (master list)
-        players_data = data.get("playerMaster") if is_jsx_format else data.get("players")
+        # Players
+        players_data = data.get("playerMaster") if is_v1 else data.get("playerMaster", data.get("players"))
         if players_data and isinstance(players_data, list) and len(players_data) > 0:
             await db.players.delete_many({})
             await db.players.insert_many(clean_docs(players_data))
-            logger.info(f"Imported {len(players_data)} players")
-
-        # Teams
-        if is_jsx_format:
-            team_a = data.get("teamA", [])
-            team_b = data.get("teamB", [])
-            if isinstance(team_a, list) and isinstance(team_b, list):
-                teams_data = {"teamA": team_a, "teamB": team_b}
-            else:
-                teams_data = {"teamA": [], "teamB": []}
-        else:
-            teams_data = data.get("teams")
-        
-        if teams_data and isinstance(teams_data, dict):
-            await db.teams.delete_many({})
-            await db.teams.insert_one(clean_docs(teams_data))
-            logger.info(f"Imported teams: A={len(teams_data.get('teamA', []))}, B={len(teams_data.get('teamB', []))}")
 
         # Matches
-        matches_data = data.get("matches")
-        if matches_data and isinstance(matches_data, list) and len(matches_data) > 0:
+        if data.get("matches") and isinstance(data["matches"], list) and len(data["matches"]) > 0:
             await db.matches.delete_many({})
-            await db.matches.insert_many(clean_docs(matches_data))
-            logger.info(f"Imported {len(matches_data)} matches")
+            await db.matches.insert_many(clean_docs(data["matches"]))
 
-        # Match Points — can be object (keyed by matchId) or array
-        mp_data = data.get("matchPoints")
-        if mp_data:
-            await db.match_points.delete_many({})
+        # Competitions
+        if is_v2:
+            await db.competitions.delete_many({})
+            for c in data["competitions"]:
+                await db.competitions.insert_one(clean_doc(c))
+            active_id = data.get("activeCompetitionId", data["competitions"][0]["id"] if data["competitions"] else None)
+            if active_id:
+                await db.app_state.update_one({"key": "activeCompetitionId"}, {"$set": {"key": "activeCompetitionId", "value": active_id}}, upsert=True)
+        elif is_v1:
+            # Convert v1 single-comp to a competition
+            mp_data = data.get("matchPoints", {})
             if isinstance(mp_data, dict) and not isinstance(mp_data, list):
-                # JSX format: object keyed by matchId -> convert to array with matchId field
-                mp_list = []
-                for match_id, mp_val in mp_data.items():
-                    if isinstance(mp_val, dict):
-                        entry = {k: v for k, v in mp_val.items() if k != '_id'}
-                        entry["matchId"] = entry.get("matchId", match_id)
-                        mp_list.append(entry)
-                if mp_list:
-                    await db.match_points.insert_many(mp_list)
-                    logger.info(f"Imported {len(mp_list)} match points (from dict)")
-            elif isinstance(mp_data, list) and len(mp_data) > 0:
-                await db.match_points.insert_many(clean_docs(mp_data))
-                logger.info(f"Imported {len(mp_data)} match points (from list)")
+                for mid, mpv in mp_data.items():
+                    if isinstance(mpv, dict):
+                        mpv["matchId"] = mpv.get("matchId", mid)
+            elif isinstance(mp_data, list):
+                mp_dict = {}
+                for mp in mp_data:
+                    if isinstance(mp, dict) and "matchId" in mp:
+                        mp_dict[mp["matchId"]] = mp
+                mp_data = mp_dict
 
-        # Settings
-        settings_data = data.get("settings")
-        if settings_data and isinstance(settings_data, dict):
-            await db.settings.delete_many({})
-            await db.settings.insert_one(clean_docs(settings_data))
-            logger.info(f"Imported settings: {list(settings_data.keys())}")
+            settings = data.get("settings", {})
+            comp = make_default_competition({
+                "id": "comp_imported",
+                "name": settings.get("teamAName", "Ankur") + " vs " + settings.get("teamBName", "Sarawat"),
+                "teamAName": settings.get("teamAName", "Ankur"),
+                "teamBName": settings.get("teamBName", "Sarawat"),
+                "maxSubstitutions": settings.get("maxSubstitutions", 8),
+                "scoring": settings.get("scoring", DEFAULT_SCORING),
+                "players": {"teamA": data.get("teamA", []), "teamB": data.get("teamB", [])},
+                "subs": {"teamA": data.get("subsA", 0), "teamB": data.get("subsB", 0)},
+                "matchPoints": mp_data,
+            })
+            await db.competitions.delete_many({})
+            await db.competitions.insert_one(comp)
+            await db.app_state.update_one({"key": "activeCompetitionId"}, {"$set": {"key": "activeCompetitionId", "value": comp["id"]}}, upsert=True)
 
-        # Substitutions
-        if is_jsx_format:
-            subs_data = {
-                "teamA": data.get("subsA", 0),
-                "teamB": data.get("subsB", 0)
-            }
-        else:
-            subs_data = data.get("substitutions")
-        if subs_data and isinstance(subs_data, dict):
-            await db.substitutions.delete_many({})
-            await db.substitutions.insert_one(clean_docs(subs_data))
-            logger.info(f"Imported substitutions: {subs_data}")
-
-        logger.info("Backup import completed successfully")
+        logger.info("Backup import completed")
         return {"success": True}
     except Exception as e:
-        logger.error(f"Backup import failed: {str(e)}")
+        logger.error(f"Import failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── ANALYTICS ENDPOINTS ─────────────────────────────────────────────────────
+# ─── INCLUDE ROUTER & MIDDLEWARE ──────────────────────────────────────────────
 
-@api_router.get("/analytics/{team_id}")
-async def get_analytics(team_id: str):
-    """Get player analytics for a team"""
-    teams = await db.teams.find_one({}, {"_id": 0})
-    matches = await db.matches.find({}, {"_id": 0}).to_list(1000)
-    match_points = await db.match_points.find({}, {"_id": 0}).to_list(1000)
-    
-    team_players = teams.get(team_id, [])
-    points_dict = {p["matchId"]: p for p in match_points}
-    
-    analytics = []
-    for player in team_players:
-        player_stats = {
-            **player,
-            "totalPoints": 0,
-            "perMatch": {}
-        }
-        
-        for match in matches:
-            mp = points_dict.get(match["id"])
-            if not mp or not mp.get("found"):
-                continue
-            
-            # Check if player's franchise is playing
-            franchises = {match["t1"], match["t2"]}
-            if player["franchise"] not in franchises:
-                player_stats["perMatch"][match["id"]] = None
-                continue
-            
-            # Check if player is active for this match
-            match_date = match["date"]
-            if player.get("effectiveDate") and player["effectiveDate"] > match_date:
-                player_stats["perMatch"][match["id"]] = {"pts": 0, "inactive": True}
-                continue
-            if player.get("endDate") and player["endDate"] < match_date:
-                player_stats["perMatch"][match["id"]] = {"pts": 0, "inactive": True}
-                continue
-            
-            # Find player in match points
-            all_players = (mp.get("teamA", {}).get("players", []) + 
-                          mp.get("teamB", {}).get("players", []))
-            
-            found_player = None
-            for sp in all_players:
-                if sp["id"] == player["id"] or sp["name"] == player["name"]:
-                    found_player = sp
-                    break
-            
-            if found_player:
-                pts = found_player.get("points", 0)
-                player_stats["totalPoints"] += pts
-                player_stats["perMatch"][match["id"]] = {
-                    "pts": pts,
-                    "runs": found_player.get("runs", 0),
-                    "wickets": found_player.get("wickets", 0)
-                }
-            else:
-                player_stats["perMatch"][match["id"]] = {"pts": 0, "runs": 0, "wickets": 0}
-        
-        analytics.append(player_stats)
-    
-    return analytics
-
-# Include router
 app.include_router(api_router)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
+app.add_middleware(CORSMiddleware, allow_credentials=True,
     allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+    allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

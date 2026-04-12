@@ -1,297 +1,428 @@
 #!/usr/bin/env python3
 """
-IPL Fantasy League Backend API Testing
-Tests all backend endpoints for functionality and data integrity
+Backend API Testing for IPL Fantasy League - Multi-Competition Support
+Tests all competition-related endpoints and functionality
 """
 
 import requests
 import json
 import sys
-from datetime import datetime, timedelta
-import hashlib
+from datetime import datetime
 
-class IPLFantasyAPITester:
+class MultiCompetitionAPITester:
     def __init__(self, base_url="https://fantasy-cricket-hub-38.preview.emergentagent.com/api"):
         self.base_url = base_url
-        self.session = requests.Session()
-        self.session.headers.update({'Content-Type': 'application/json'})
         self.tests_run = 0
         self.tests_passed = 0
-        self.admin_user = None
-        self.test_results = []
+        self.comp_ids = []  # Track created competition IDs for cleanup
 
-    def log_result(self, test_name, success, details=""):
-        """Log test result"""
+    def run_test(self, name, method, endpoint, expected_status, data=None, headers=None):
+        """Run a single API test"""
+        url = f"{self.base_url}/{endpoint}"
+        if headers is None:
+            headers = {'Content-Type': 'application/json'}
+
         self.tests_run += 1
-        if success:
-            self.tests_passed += 1
-            print(f"✅ {test_name}")
-        else:
-            print(f"❌ {test_name} - {details}")
+        print(f"\n🔍 Testing {name}...")
         
-        self.test_results.append({
-            "test": test_name,
-            "success": success,
-            "details": details
-        })
+        try:
+            if method == 'GET':
+                response = requests.get(url, headers=headers)
+            elif method == 'POST':
+                response = requests.post(url, json=data, headers=headers)
+            elif method == 'PUT':
+                response = requests.put(url, json=data, headers=headers)
+            elif method == 'DELETE':
+                response = requests.delete(url, headers=headers)
 
-    def sha256(self, text):
-        """Generate SHA-256 hash"""
-        return hashlib.sha256(text.encode()).hexdigest()
+            success = response.status_code == expected_status
+            if success:
+                self.tests_passed += 1
+                print(f"✅ Passed - Status: {response.status_code}")
+                try:
+                    return True, response.json()
+                except:
+                    return True, {}
+            else:
+                print(f"❌ Failed - Expected {expected_status}, got {response.status_code}")
+                try:
+                    print(f"   Response: {response.text}")
+                except:
+                    pass
+                return False, {}
 
-    def test_auth_endpoints(self):
-        """Test authentication endpoints"""
-        print("\n🔐 Testing Authentication Endpoints...")
+        except Exception as e:
+            print(f"❌ Failed - Error: {str(e)}")
+            return False, {}
+
+    def test_competitions_crud(self):
+        """Test competition CRUD operations"""
+        print("\n" + "="*60)
+        print("TESTING COMPETITION CRUD OPERATIONS")
+        print("="*60)
         
-        # Test get users
-        try:
-            response = self.session.get(f"{self.base_url}/auth/users")
-            if response.status_code == 200:
-                users = response.json()
-                self.log_result("GET /auth/users", True, f"Found {len(users)} users")
-                
-                # Find admin user
-                admin_user = None
-                for user in users:
-                    if user.get('username') == 'ankur.citm@gmail.com' and user.get('role') == 'admin':
-                        admin_user = user
-                        break
-                
-                if admin_user:
-                    self.admin_user = admin_user
-                    self.log_result("Admin user found", True, "ankur.citm@gmail.com exists")
-                else:
-                    self.log_result("Admin user found", False, "ankur.citm@gmail.com not found")
-            else:
-                self.log_result("GET /auth/users", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /auth/users", False, str(e))
-
-        # Test login with admin credentials
-        try:
-            login_data = {
-                "username": "ankur.citm@gmail.com",
-                "password": "admin"
-            }
-            response = self.session.post(f"{self.base_url}/auth/login", json=login_data)
-            if response.status_code == 200:
-                user_data = response.json()
-                if user_data.get('role') == 'admin':
-                    self.log_result("Admin login", True, "Successfully authenticated")
-                else:
-                    self.log_result("Admin login", False, f"Wrong role: {user_data.get('role')}")
-            else:
-                self.log_result("Admin login", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("Admin login", False, str(e))
-
-    def test_player_endpoints(self):
-        """Test player management endpoints"""
-        print("\n👥 Testing Player Endpoints...")
+        # 1. Get existing competitions
+        success, comps = self.run_test(
+            "GET /competitions - List competitions",
+            "GET", "competitions", 200
+        )
+        if not success:
+            return False
         
-        # Test get players
-        try:
-            response = self.session.get(f"{self.base_url}/players")
-            if response.status_code == 200:
-                players = response.json()
-                self.log_result("GET /players", True, f"Found {len(players)} players")
-            else:
-                self.log_result("GET /players", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /players", False, str(e))
-
-    def test_team_endpoints(self):
-        """Test team management endpoints"""
-        print("\n🏏 Testing Team Endpoints...")
+        initial_count = len(comps)
+        print(f"   Found {initial_count} existing competitions")
         
-        # Test get teams
-        try:
-            response = self.session.get(f"{self.base_url}/teams")
-            if response.status_code == 200:
-                teams = response.json()
-                team_a_count = len(teams.get('teamA', []))
-                team_b_count = len(teams.get('teamB', []))
-                self.log_result("GET /teams", True, f"TeamA: {team_a_count}, TeamB: {team_b_count} players")
-            else:
-                self.log_result("GET /teams", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /teams", False, str(e))
-
-        # Test get substitutions
-        try:
-            response = self.session.get(f"{self.base_url}/teams/substitutions")
-            if response.status_code == 200:
-                subs = response.json()
-                self.log_result("GET /teams/substitutions", True, f"TeamA: {subs.get('teamA', 0)}, TeamB: {subs.get('teamB', 0)} subs")
-            else:
-                self.log_result("GET /teams/substitutions", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /teams/substitutions", False, str(e))
-
-    def test_match_endpoints(self):
-        """Test match management endpoints"""
-        print("\n🏆 Testing Match Endpoints...")
+        # 2. Create new competition
+        new_comp_data = {
+            "id": f"comp_test_{int(datetime.now().timestamp())}",
+            "name": "Test Competition 2026",
+            "teamAName": "Test Team A",
+            "teamBName": "Test Team B"
+        }
         
-        # Test get matches
-        try:
-            response = self.session.get(f"{self.base_url}/matches")
-            if response.status_code == 200:
-                matches = response.json()
-                self.log_result("GET /matches", True, f"Found {len(matches)} matches")
-                
-                # Verify we have 88 matches as mentioned in requirements
-                if len(matches) == 88:
-                    self.log_result("Match count verification", True, "88 matches found as expected")
-                else:
-                    self.log_result("Match count verification", False, f"Expected 88, found {len(matches)}")
-            else:
-                self.log_result("GET /matches", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /matches", False, str(e))
-
-    def test_match_points_endpoints(self):
-        """Test match points endpoints"""
-        print("\n📊 Testing Match Points Endpoints...")
+        success, created_comp = self.run_test(
+            "POST /competitions - Create competition",
+            "POST", "competitions", 200, new_comp_data
+        )
+        if not success:
+            return False
         
-        # Test get all match points
-        try:
-            response = self.session.get(f"{self.base_url}/match-points")
-            if response.status_code == 200:
-                points = response.json()
-                self.log_result("GET /match-points", True, f"Found points for {len(points)} matches")
-            else:
-                self.log_result("GET /match-points", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /match-points", False, str(e))
-
-    def test_settings_endpoints(self):
-        """Test settings endpoints"""
-        print("\n⚙️ Testing Settings Endpoints...")
+        comp_id = created_comp.get("id")
+        if comp_id:
+            self.comp_ids.append(comp_id)
+            print(f"   Created competition with ID: {comp_id}")
         
-        # Test get settings
-        try:
-            response = self.session.get(f"{self.base_url}/settings")
-            if response.status_code == 200:
-                settings = response.json()
-                team_a = settings.get('teamAName', 'Unknown')
-                team_b = settings.get('teamBName', 'Unknown')
-                max_subs = settings.get('maxSubstitutions', 0)
-                self.log_result("GET /settings", True, f"Teams: {team_a} vs {team_b}, Max subs: {max_subs}")
-            else:
-                self.log_result("GET /settings", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /settings", False, str(e))
+        # 3. Get specific competition
+        success, comp_detail = self.run_test(
+            f"GET /competitions/{comp_id} - Get competition details",
+            "GET", f"competitions/{comp_id}", 200
+        )
+        if not success:
+            return False
+        
+        # Verify competition structure
+        required_fields = ["id", "name", "teamAName", "teamBName", "maxSubstitutions", "scoring", "players", "subs", "matchPoints"]
+        for field in required_fields:
+            if field not in comp_detail:
+                print(f"❌ Missing required field: {field}")
+                return False
+        print(f"   Competition structure verified")
+        
+        # 4. Update competition
+        update_data = {
+            "name": "Updated Test Competition",
+            "teamAName": "Updated Team A"
+        }
+        
+        success, updated_comp = self.run_test(
+            f"PUT /competitions/{comp_id} - Update competition",
+            "PUT", f"competitions/{comp_id}", 200, update_data
+        )
+        if not success:
+            return False
+        
+        if updated_comp.get("name") != "Updated Test Competition":
+            print(f"❌ Competition name not updated correctly")
+            return False
+        print(f"   Competition updated successfully")
+        
+        # 5. List competitions again to verify count
+        success, updated_comps = self.run_test(
+            "GET /competitions - List competitions after create",
+            "GET", "competitions", 200
+        )
+        if not success:
+            return False
+        
+        if len(updated_comps) != initial_count + 1:
+            print(f"❌ Competition count mismatch. Expected {initial_count + 1}, got {len(updated_comps)}")
+            return False
+        print(f"   Competition count verified: {len(updated_comps)}")
+        
+        return True
+
+    def test_active_competition(self):
+        """Test active competition management"""
+        print("\n" + "="*60)
+        print("TESTING ACTIVE COMPETITION MANAGEMENT")
+        print("="*60)
+        
+        # 1. Get current active competition
+        success, active_data = self.run_test(
+            "GET /active-competition - Get active competition",
+            "GET", "active-competition", 200
+        )
+        if not success:
+            return False
+        
+        original_active = active_data.get("activeCompetitionId")
+        print(f"   Current active competition: {original_active}")
+        
+        # 2. Set new active competition (use first created comp if available)
+        if self.comp_ids:
+            test_comp_id = self.comp_ids[0]
+            success, _ = self.run_test(
+                "PUT /active-competition - Set active competition",
+                "PUT", "active-competition", 200, {"activeCompetitionId": test_comp_id}
+            )
+            if not success:
+                return False
+            
+            # 3. Verify active competition changed
+            success, new_active_data = self.run_test(
+                "GET /active-competition - Verify active competition changed",
+                "GET", "active-competition", 200
+            )
+            if not success:
+                return False
+            
+            if new_active_data.get("activeCompetitionId") != test_comp_id:
+                print(f"❌ Active competition not updated. Expected {test_comp_id}, got {new_active_data.get('activeCompetitionId')}")
+                return False
+            print(f"   Active competition updated to: {test_comp_id}")
+            
+            # 4. Restore original active competition
+            if original_active:
+                success, _ = self.run_test(
+                    "PUT /active-competition - Restore original active",
+                    "PUT", "active-competition", 200, {"activeCompetitionId": original_active}
+                )
+                if not success:
+                    return False
+                print(f"   Restored original active competition: {original_active}")
+        
+        return True
+
+    def test_competition_scoped_endpoints(self):
+        """Test competition-scoped endpoints"""
+        print("\n" + "="*60)
+        print("TESTING COMPETITION-SCOPED ENDPOINTS")
+        print("="*60)
+        
+        # Use default competition for testing
+        comp_id = "comp_default"
+        
+        # 1. Test competition teams endpoint
+        success, teams_data = self.run_test(
+            f"GET /competitions/{comp_id}/teams - Get competition teams",
+            "GET", f"competitions/{comp_id}/teams", 200
+        )
+        if not success:
+            return False
+        
+        if not isinstance(teams_data, dict) or "teamA" not in teams_data or "teamB" not in teams_data:
+            print(f"❌ Invalid teams structure: {teams_data}")
+            return False
+        print(f"   Teams structure verified: teamA({len(teams_data['teamA'])}), teamB({len(teams_data['teamB'])})")
+        
+        # 2. Test competition match points endpoint
+        success, match_points = self.run_test(
+            f"GET /competitions/{comp_id}/match-points - Get competition match points",
+            "GET", f"competitions/{comp_id}/match-points", 200
+        )
+        if not success:
+            return False
+        
+        if not isinstance(match_points, dict):
+            print(f"❌ Invalid match points structure: {match_points}")
+            return False
+        print(f"   Match points structure verified: {len(match_points)} matches")
+        
+        # 3. Test competition settings endpoint
+        success, settings = self.run_test(
+            f"GET /competitions/{comp_id}/settings - Get competition settings",
+            "GET", f"competitions/{comp_id}/settings", 200
+        )
+        if not success:
+            return False
+        
+        required_settings = ["teamAName", "teamBName", "maxSubstitutions", "scoring"]
+        for field in required_settings:
+            if field not in settings:
+                print(f"❌ Missing required setting: {field}")
+                return False
+        print(f"   Settings structure verified")
+        
+        # 4. Test updating competition settings
+        updated_settings = {
+            "teamAName": "Test Team Alpha",
+            "teamBName": "Test Team Beta",
+            "maxSubstitutions": 10
+        }
+        
+        success, _ = self.run_test(
+            f"PUT /competitions/{comp_id}/settings - Update competition settings",
+            "PUT", f"competitions/{comp_id}/settings", 200, updated_settings
+        )
+        if not success:
+            return False
+        
+        # 5. Verify settings were updated
+        success, updated_settings_data = self.run_test(
+            f"GET /competitions/{comp_id}/settings - Verify settings updated",
+            "GET", f"competitions/{comp_id}/settings", 200
+        )
+        if not success:
+            return False
+        
+        if updated_settings_data.get("teamAName") != "Test Team Alpha":
+            print(f"❌ Settings not updated correctly")
+            return False
+        print(f"   Settings updated successfully")
+        
+        return True
 
     def test_backup_endpoints(self):
-        """Test backup/restore endpoints"""
-        print("\n💾 Testing Backup Endpoints...")
+        """Test backup import/export endpoints"""
+        print("\n" + "="*60)
+        print("TESTING BACKUP IMPORT/EXPORT")
+        print("="*60)
         
-        # Test backup export - this is critical for JSX format compatibility
-        try:
-            response = self.session.get(f"{self.base_url}/backup/export")
-            if response.status_code == 200:
-                backup_data = response.json()
-                
-                # Verify JSX format keys are present
-                required_keys = ['settings', 'playerMaster', 'teamA', 'teamB', 'subsA', 'subsB', 'matches', 'matchPoints', 'users']
-                missing_keys = [key for key in required_keys if key not in backup_data]
-                
-                if not missing_keys:
-                    self.log_result("Backup export JSX format", True, "All required JSX keys present")
-                else:
-                    self.log_result("Backup export JSX format", False, f"Missing keys: {missing_keys}")
-                
-                # Check data types
-                if isinstance(backup_data.get('teamA'), list) and isinstance(backup_data.get('teamB'), list):
-                    self.log_result("Backup team data format", True, "Teams are arrays as expected")
-                else:
-                    self.log_result("Backup team data format", False, "Teams should be arrays")
-                
-                if isinstance(backup_data.get('matchPoints'), dict):
-                    self.log_result("Backup matchPoints format", True, "MatchPoints is object as expected")
-                else:
-                    self.log_result("Backup matchPoints format", False, "MatchPoints should be object")
-                    
-            else:
-                self.log_result("GET /backup/export", False, f"Status: {response.status_code}")
-        except Exception as e:
-            self.log_result("GET /backup/export", False, str(e))
+        # 1. Test backup export
+        success, backup_data = self.run_test(
+            "GET /backup/export - Export backup",
+            "GET", "backup/export", 200
+        )
+        if not success:
+            return False
+        
+        # Verify v2 format (should have competitions array)
+        if "competitions" not in backup_data:
+            print(f"❌ Backup missing competitions array (v2 format)")
+            return False
+        
+        # Verify v1 compatibility keys
+        v1_keys = ["settings", "playerMaster", "teamA", "teamB", "matches", "users"]
+        for key in v1_keys:
+            if key not in backup_data:
+                print(f"❌ Backup missing v1 compatibility key: {key}")
+                return False
+        
+        print(f"   Backup export verified: v2 format with v1 compatibility")
+        print(f"   Competitions: {len(backup_data['competitions'])}")
+        print(f"   Players: {len(backup_data.get('playerMaster', []))}")
+        print(f"   Matches: {len(backup_data.get('matches', []))}")
+        
+        # 2. Test backup import (using exported data)
+        success, _ = self.run_test(
+            "POST /backup/import - Import backup",
+            "POST", "backup/import", 200, backup_data
+        )
+        if not success:
+            return False
+        
+        print(f"   Backup import successful")
+        
+        return True
 
-    def test_score_refresh_endpoints(self):
-        """Test score refresh endpoints"""
-        print("\n🔄 Testing Score Refresh Endpoints...")
+    def test_shared_endpoints(self):
+        """Test shared endpoints (players, matches, users)"""
+        print("\n" + "="*60)
+        print("TESTING SHARED ENDPOINTS")
+        print("="*60)
         
-        # Get a match ID for testing
-        try:
-            matches_response = self.session.get(f"{self.base_url}/matches")
-            if matches_response.status_code == 200:
-                matches = matches_response.json()
-                if matches:
-                    test_match_id = matches[0]['id']
-                    
-                    # Test API refresh (should handle gracefully even if no data)
-                    try:
-                        refresh_data = {"matchId": test_match_id}
-                        response = self.session.post(f"{self.base_url}/scores/refresh-api", json=refresh_data)
-                        if response.status_code in [200, 404, 500]:  # Any of these are acceptable
-                            self.log_result("POST /scores/refresh-api", True, f"Status: {response.status_code}")
-                        else:
-                            self.log_result("POST /scores/refresh-api", False, f"Unexpected status: {response.status_code}")
-                    except Exception as e:
-                        self.log_result("POST /scores/refresh-api", False, str(e))
-                    
-                    # Test Claude refresh (should handle gracefully even if no data)
-                    try:
-                        refresh_data = {"matchId": test_match_id}
-                        response = self.session.post(f"{self.base_url}/scores/refresh-claude", json=refresh_data)
-                        if response.status_code in [200, 404, 500]:  # Any of these are acceptable
-                            self.log_result("POST /scores/refresh-claude", True, f"Status: {response.status_code}")
-                        else:
-                            self.log_result("POST /scores/refresh-claude", False, f"Unexpected status: {response.status_code}")
-                    except Exception as e:
-                        self.log_result("POST /scores/refresh-claude", False, str(e))
-                else:
-                    self.log_result("Score refresh test setup", False, "No matches found for testing")
-        except Exception as e:
-            self.log_result("Score refresh test setup", False, str(e))
+        # 1. Test players endpoint
+        success, players = self.run_test(
+            "GET /players - Get all players",
+            "GET", "players", 200
+        )
+        if not success:
+            return False
+        
+        if not isinstance(players, list) or len(players) == 0:
+            print(f"❌ No players found")
+            return False
+        print(f"   Players verified: {len(players)} players")
+        
+        # 2. Test matches endpoint
+        success, matches = self.run_test(
+            "GET /matches - Get all matches",
+            "GET", "matches", 200
+        )
+        if not success:
+            return False
+        
+        if not isinstance(matches, list) or len(matches) == 0:
+            print(f"❌ No matches found")
+            return False
+        print(f"   Matches verified: {len(matches)} matches")
+        
+        # 3. Test users endpoint
+        success, users = self.run_test(
+            "GET /auth/users - Get all users",
+            "GET", "auth/users", 200
+        )
+        if not success:
+            return False
+        
+        if not isinstance(users, list) or len(users) == 0:
+            print(f"❌ No users found")
+            return False
+        print(f"   Users verified: {len(users)} users")
+        
+        return True
+
+    def cleanup(self):
+        """Clean up test competitions"""
+        print("\n" + "="*60)
+        print("CLEANING UP TEST DATA")
+        print("="*60)
+        
+        for comp_id in self.comp_ids:
+            success, _ = self.run_test(
+                f"DELETE /competitions/{comp_id} - Delete test competition",
+                "DELETE", f"competitions/{comp_id}", 200
+            )
+            if success:
+                print(f"   Deleted competition: {comp_id}")
+            else:
+                print(f"   Failed to delete competition: {comp_id}")
 
     def run_all_tests(self):
-        """Run all backend API tests"""
-        print("🚀 Starting IPL Fantasy League Backend API Tests")
-        print(f"Testing against: {self.base_url}")
-        print("=" * 60)
+        """Run all backend tests"""
+        print("🚀 Starting Multi-Competition Backend API Tests")
+        print(f"📡 Testing against: {self.base_url}")
         
-        self.test_auth_endpoints()
-        self.test_player_endpoints()
-        self.test_team_endpoints()
-        self.test_match_endpoints()
-        self.test_match_points_endpoints()
-        self.test_settings_endpoints()
-        self.test_backup_endpoints()
-        self.test_score_refresh_endpoints()
-        
-        print("\n" + "=" * 60)
-        print(f"📊 Test Results: {self.tests_passed}/{self.tests_run} passed")
-        
-        if self.tests_passed == self.tests_run:
-            print("🎉 All backend tests passed!")
-            return True
-        else:
-            print(f"⚠️  {self.tests_run - self.tests_passed} tests failed")
-            return False
+        try:
+            # Run all test suites
+            tests = [
+                self.test_shared_endpoints,
+                self.test_competitions_crud,
+                self.test_active_competition,
+                self.test_competition_scoped_endpoints,
+                self.test_backup_endpoints
+            ]
+            
+            all_passed = True
+            for test in tests:
+                if not test():
+                    all_passed = False
+                    break
+            
+            # Cleanup
+            self.cleanup()
+            
+            # Print results
+            print("\n" + "="*60)
+            print("TEST RESULTS SUMMARY")
+            print("="*60)
+            print(f"📊 Tests passed: {self.tests_passed}/{self.tests_run}")
+            print(f"🎯 Success rate: {(self.tests_passed/self.tests_run)*100:.1f}%")
+            
+            if all_passed and self.tests_passed == self.tests_run:
+                print("✅ All tests passed!")
+                return 0
+            else:
+                print("❌ Some tests failed!")
+                return 1
+                
+        except Exception as e:
+            print(f"💥 Test suite failed with error: {str(e)}")
+            return 1
 
 def main():
-    """Main test execution"""
-    tester = IPLFantasyAPITester()
-    success = tester.run_all_tests()
-    
-    # Print detailed results for debugging
-    print("\n📋 Detailed Test Results:")
-    for result in tester.test_results:
-        status = "✅" if result["success"] else "❌"
-        print(f"{status} {result['test']}: {result['details']}")
-    
-    return 0 if success else 1
+    tester = MultiCompetitionAPITester()
+    return tester.run_all_tests()
 
 if __name__ == "__main__":
     sys.exit(main())

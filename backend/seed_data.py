@@ -308,15 +308,10 @@ async def seed_database():
     
     print("🌱 Seeding IPL Fantasy League database...")
     
-    # Clear existing data
+    # Clear ALL collections
     print("  - Clearing existing data...")
-    await db.users.delete_many({})
-    await db.players.delete_many({})
-    await db.matches.delete_many({})
-    await db.teams.delete_many({})
-    await db.settings.delete_many({})
-    await db.substitutions.delete_many({})
-    await db.match_points.delete_many({})
+    for col in ["users", "players", "matches", "competitions", "app_state", "teams", "settings", "substitutions", "match_points"]:
+        await db[col].delete_many({})
     
     # Seed users
     print("  - Creating default admin user...")
@@ -330,24 +325,30 @@ async def seed_database():
     print(f"  - Adding {len(LEAGUE_MATCHES)} matches...")
     await db.matches.insert_many(LEAGUE_MATCHES)
     
-    # Initialize empty teams
-    print("  - Initializing empty teams...")
-    await db.teams.insert_one({"teamA": [], "teamB": []})
+    # Create default competition
+    print("  - Creating default competition...")
+    default_comp = {
+        "id": "comp_default",
+        "name": "IPL 2026",
+        "teamAName": "Ankur",
+        "teamBName": "Sarawat",
+        "maxSubstitutions": 8,
+        "scoring": DEFAULT_SETTINGS["scoring"],
+        "players": {"teamA": [], "teamB": []},
+        "subs": {"teamA": 0, "teamB": 0},
+        "matchPoints": {},
+    }
+    await db.competitions.insert_one(default_comp)
     
-    # Seed settings
-    print("  - Setting default configuration...")
-    await db.settings.insert_one(DEFAULT_SETTINGS)
-    
-    # Initialize substitutions
-    print("  - Initializing substitution counters...")
-    await db.substitutions.insert_one({"teamA": 0, "teamB": 0})
+    # Set active competition
+    await db.app_state.insert_one({"key": "activeCompetitionId", "value": "comp_default"})
     
     print("✅ Database seeding complete!")
     print(f"\n📊 Summary:")
     print(f"   Users: 1 (admin)")
     print(f"   Players: {len(INITIAL_PLAYERS)}")
     print(f"   Matches: {len(LEAGUE_MATCHES)}")
-    print(f"   Teams: Ankur & Sarawat (empty)")
+    print(f"   Competitions: 1 (IPL 2026)")
     print(f"\n🔑 Default Login:")
     print(f"   Username: ankur.citm@gmail.com")
     print(f"   Password: admin")
