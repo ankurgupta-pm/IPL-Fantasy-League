@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../utils/api';
 
-export default function SettingsPage({ currentUser, showToast }) {
+export default function SettingsPage({ currentUser, showToast, onDataRefresh }) {
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const importRef = useRef();
@@ -91,9 +91,11 @@ export default function SettingsPage({ currentUser, showToast }) {
         // Send the raw JSON as-is — backend handles format detection
         await api.importBackup(data);
 
-        showToast('Backup imported successfully! Reloading...');
-        // Force full page reload so all pages pick up new data
-        window.location.reload();
+        showToast('Backup imported successfully!');
+        // Refresh settings on this page
+        await loadSettings();
+        // Tell parent to re-mount all pages so they pick up new data
+        if (onDataRefresh) onDataRefresh();
       } catch (err) {
         showToast('Failed to import backup: ' + err.message, 'error');
       }

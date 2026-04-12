@@ -17,20 +17,47 @@ const Toast = ({ message, type = 'success', onClose }) => (
 
 // Main App Component
 function App() {
-  const [currentUser, setCurrentUser] = useState(null);
+  const [currentUser, setCurrentUser] = useState(() => {
+    // Restore session from sessionStorage on mount
+    try {
+      const saved = sessionStorage.getItem('ipl_fantasy_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
   const [currentPage, setCurrentPage] = useState('leaderboard');
   const [toast, setToast] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
   
   const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
   }, []);
 
+  // Persist session whenever currentUser changes
+  const handleLogin = useCallback((user) => {
+    setCurrentUser(user);
+    if (user) {
+      sessionStorage.setItem('ipl_fantasy_user', JSON.stringify(user));
+    } else {
+      sessionStorage.removeItem('ipl_fantasy_user');
+    }
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    setCurrentUser(null);
+    sessionStorage.removeItem('ipl_fantasy_user');
+  }, []);
+
+  // Called after backup import to force all child pages to re-fetch data
+  const handleDataRefresh = useCallback(() => {
+    setRefreshKey(k => k + 1);
+  }, []);
+
   if (!currentUser) {
     return (
       <>
         {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
-        <LoginPage onLogin={setCurrentUser} showToast={showToast} />
+        <LoginPage onLogin={handleLogin} showToast={showToast} />
       </>
     );
   }
@@ -86,7 +113,7 @@ function App() {
               <div className="text-xs text-slate-400 capitalize">{currentUser.role}</div>
             </div>
             <button
-              onClick={() => setCurrentUser(null)}
+              onClick={handleLogout}
               data-testid="logout-btn"
               className="px-3 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-sm transition-colors"
             >
@@ -125,11 +152,11 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 py-6">
-        {currentPage === 'leaderboard' && <LeaderboardPage currentUser={currentUser} showToast={showToast} />}
-        {currentPage === 'teams' && <TeamsPage currentUser={currentUser} showToast={showToast} />}
-        {currentPage === 'analytics' && <AnalyticsPage currentUser={currentUser} showToast={showToast} />}
-        {currentPage === 'settings' && <SettingsPage currentUser={currentUser} showToast={showToast} />}
-        {currentPage === 'admin' && <AdminPanel currentUser={currentUser} setCurrentUser={setCurrentUser} showToast={showToast} />}
+        {currentPage === 'leaderboard' && <LeaderboardPage key={`lb-${refreshKey}`} currentUser={currentUser} showToast={showToast} />}
+        {currentPage === 'teams' && <TeamsPage key={`tm-${refreshKey}`} currentUser={currentUser} showToast={showToast} />}
+        {currentPage === 'analytics' && <AnalyticsPage key={`an-${refreshKey}`} currentUser={currentUser} showToast={showToast} />}
+        {currentPage === 'settings' && <SettingsPage key={`st-${refreshKey}`} currentUser={currentUser} showToast={showToast} onDataRefresh={handleDataRefresh} />}
+        {currentPage === 'admin' && <AdminPanel key={`ad-${refreshKey}`} currentUser={currentUser} setCurrentUser={handleLogin} showToast={showToast} />}
       </main>
     </div>
   );

@@ -719,12 +719,36 @@ async def import_backup(data: Dict[str, Any] = Body(...)):
         is_jsx_format = "teamA" in data or "playerMaster" in data
         logger.info(f"Importing backup. Format: {'JSX' if is_jsx_format else 'API'}. Keys: {list(data.keys())}")
 
-        # Users
+        # Users — merge with existing: import new users but preserve any existing
+        # admin that isn't in the backup (so the currently logged-in user isn't locked out)
         users_data = data.get("users")
         if users_data and isinstance(users_data, list) and len(users_data) > 0:
+            # Get existing users before replacing
+            existing_users = await db.users.find({}, {"_id": 0}).to_list(1000)
+            existing_by_id = {u["id"]: u for u in existing_users}
+            
+            # Build merged list: start with imported users
+            imported_by_id = {u["id"]: u for u in clean_docs(users_data)}
+            
+            # Preserve any existing admin that's NOT in the import
+            for uid_val, user in existing_by_id.items():
+                if uid_val not in imported_by_id and user.get("role") == "admin":
+                    imported_by_id[uid_val] = user
+            
+            # Ensure default admin always exists as fallback
+            if "admin-ankur" not in imported_by_id:
+                imported_by_id["admin-ankur"] = {
+                    "id": "admin-ankur",
+                    "username": "ankur.citm@gmail.com",
+                    "passwordHash": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
+                    "role": "admin",
+                    "editPerms": []
+                }
+            
+            merged_users = list(imported_by_id.values())
             await db.users.delete_many({})
-            await db.users.insert_many(clean_docs(users_data))
-            logger.info(f"Imported {len(users_data)} users")
+            await db.users.insert_many(merged_users)
+            logger.info(f"Imported {len(merged_users)} users (merged with existing admins)")
 
         # Players (master list)
         players_data = data.get("playerMaster") if is_jsx_format else data.get("players")
