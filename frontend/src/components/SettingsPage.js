@@ -79,71 +79,21 @@ export default function SettingsPage({ currentUser, showToast }) {
   };
 
   // ─── BACKUP IMPORT ─────────────────────────────────────────────────────
-  // Accepts BOTH the original JSX format (teamA/teamB/subsA/subsB/playerMaster)
-  // AND the newer API format (teams.teamA/teams.teamB/substitutions)
+  // Sends raw JSON directly to backend — backend handles ALL format detection.
+  // Supports original JSX prototype format AND newer API format.
   const handleImport = async (file) => {
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
         const data = JSON.parse(e.target.result);
 
-        // Detect format: original JSX uses `teamA` at root level,
-        // newer API uses `teams: { teamA, teamB }`
-        const isJsxFormat = data.teamA !== undefined || data.playerMaster !== undefined;
-
-        let importPayload;
-
-        if (isJsxFormat) {
-          // Original JSX prototype format
-          importPayload = {
-            settings: data.settings || undefined,
-            players: data.playerMaster || undefined,
-            teams: {
-              teamA: data.teamA || [],
-              teamB: data.teamB || []
-            },
-            matches: data.matches || undefined,
-            matchPoints: (() => {
-              // matchPoints in JSX format is an object keyed by matchId
-              // Convert to array for the API
-              if (!data.matchPoints) return undefined;
-              if (Array.isArray(data.matchPoints)) return data.matchPoints;
-              return Object.values(data.matchPoints);
-            })(),
-            users: data.users || undefined,
-            substitutions: {
-              teamA: data.subsA || 0,
-              teamB: data.subsB || 0
-            }
-          };
-        } else {
-          // Newer API format (already in correct shape)
-          importPayload = {
-            settings: data.settings || undefined,
-            players: data.players || undefined,
-            teams: data.teams || undefined,
-            matches: data.matches || undefined,
-            matchPoints: (() => {
-              if (!data.matchPoints) return undefined;
-              if (Array.isArray(data.matchPoints)) return data.matchPoints;
-              return Object.values(data.matchPoints);
-            })(),
-            users: data.users || undefined,
-            substitutions: data.substitutions || undefined
-          };
-        }
-
-        // Remove undefined keys
-        Object.keys(importPayload).forEach(k => {
-          if (importPayload[k] === undefined) delete importPayload[k];
-        });
-
         showToast('Importing backup...');
-        await api.importBackup(importPayload);
+        // Send the raw JSON as-is — backend handles format detection
+        await api.importBackup(data);
 
-        showToast('Backup imported successfully! Reloading data...');
-        // Reload settings
-        await loadSettings();
+        showToast('Backup imported successfully! Reloading...');
+        // Force full page reload so all pages pick up new data
+        window.location.reload();
       } catch (err) {
         showToast('Failed to import backup: ' + err.message, 'error');
       }

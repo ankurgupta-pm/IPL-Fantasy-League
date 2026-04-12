@@ -358,6 +358,9 @@ async def get_teams():
     teams = await db.teams.find_one({}, {"_id": 0})
     if not teams:
         teams = {"teamA": [], "teamB": []}
+    # Ensure both keys exist
+    teams.setdefault("teamA", [])
+    teams.setdefault("teamB", [])
     return teams
 
 @api_router.post("/teams/{team_id}/players")
@@ -466,7 +469,12 @@ async def set_cricket_data_id(request: SetCricketDataIdRequest):
 async def get_all_match_points():
     """Get all match points"""
     points = await db.match_points.find({}, {"_id": 0}).to_list(1000)
-    return {p["matchId"]: p for p in points}
+    result = {}
+    for p in points:
+        mid = p.get("matchId")
+        if mid:
+            result[mid] = p
+    return result
 
 @api_router.get("/match-points/{match_id}")
 async def get_match_points(match_id: str):
@@ -696,61 +704,83 @@ async def import_backup(data: Dict[str, Any] = Body(...)):
     Accepts BOTH original JSX format (teamA/teamB/subsA/subsB/playerMaster)
     AND the newer API format (teams/substitutions/players).
     """
+    import copy
+    
+    def clean_docs(docs):
+        """Remove _id fields and make deep copies to avoid mutation issues."""
+        if isinstance(docs, list):
+            return [{k: v for k, v in doc.items() if k != '_id'} for doc in docs if isinstance(doc, dict)]
+        if isinstance(docs, dict):
+            return {k: v for k, v in docs.items() if k != '_id'}
+        return docs
+    
     try:
         # Detect format: original JSX uses `teamA` at root, newer uses `teams`
         is_jsx_format = "teamA" in data or "playerMaster" in data
+        logger.info(f"Importing backup. Format: {'JSX' if is_jsx_format else 'API'}. Keys: {list(data.keys())}")
 
         # Users
         users_data = data.get("users")
-        if users_data:
+        if users_data and isinstance(users_data, list) and len(users_data) > 0:
             await db.users.delete_many({})
-            await db.users.insert_many(users_data)
+            await db.users.insert_many(clean_docs(users_data))
+            logger.info(f"Imported {len(users_data)} users")
 
         # Players (master list)
         players_data = data.get("playerMaster") if is_jsx_format else data.get("players")
-        if players_data:
+        if players_data and isinstance(players_data, list) and len(players_data) > 0:
             await db.players.delete_many({})
-            await db.players.insert_many(players_data)
+            await db.players.insert_many(clean_docs(players_data))
+            logger.info(f"Imported {len(players_data)} players")
 
         # Teams
         if is_jsx_format:
-            teams_data = {
-                "teamA": data.get("teamA", []),
-                "teamB": data.get("teamB", [])
-            }
+            team_a = data.get("teamA", [])
+            team_b = data.get("teamB", [])
+            if isinstance(team_a, list) and isinstance(team_b, list):
+                teams_data = {"teamA": team_a, "teamB": team_b}
+            else:
+                teams_data = {"teamA": [], "teamB": []}
         else:
             teams_data = data.get("teams")
-        if teams_data:
+        
+        if teams_data and isinstance(teams_data, dict):
             await db.teams.delete_many({})
-            await db.teams.insert_one(teams_data)
+            await db.teams.insert_one(clean_docs(teams_data))
+            logger.info(f"Imported teams: A={len(teams_data.get('teamA', []))}, B={len(teams_data.get('teamB', []))}")
 
         # Matches
         matches_data = data.get("matches")
-        if matches_data:
+        if matches_data and isinstance(matches_data, list) and len(matches_data) > 0:
             await db.matches.delete_many({})
-            await db.matches.insert_many(matches_data)
+            await db.matches.insert_many(clean_docs(matches_data))
+            logger.info(f"Imported {len(matches_data)} matches")
 
         # Match Points — can be object (keyed by matchId) or array
         mp_data = data.get("matchPoints")
         if mp_data:
             await db.match_points.delete_many({})
-            if isinstance(mp_data, dict):
-                # JSX format: object keyed by matchId
+            if isinstance(mp_data, dict) and not isinstance(mp_data, list):
+                # JSX format: object keyed by matchId -> convert to array with matchId field
                 mp_list = []
                 for match_id, mp_val in mp_data.items():
                     if isinstance(mp_val, dict):
-                        mp_val["matchId"] = mp_val.get("matchId", match_id)
-                        mp_list.append(mp_val)
+                        entry = {k: v for k, v in mp_val.items() if k != '_id'}
+                        entry["matchId"] = entry.get("matchId", match_id)
+                        mp_list.append(entry)
                 if mp_list:
                     await db.match_points.insert_many(mp_list)
-            elif isinstance(mp_data, list) and mp_data:
-                await db.match_points.insert_many(mp_data)
+                    logger.info(f"Imported {len(mp_list)} match points (from dict)")
+            elif isinstance(mp_data, list) and len(mp_data) > 0:
+                await db.match_points.insert_many(clean_docs(mp_data))
+                logger.info(f"Imported {len(mp_data)} match points (from list)")
 
         # Settings
         settings_data = data.get("settings")
-        if settings_data:
+        if settings_data and isinstance(settings_data, dict):
             await db.settings.delete_many({})
-            await db.settings.insert_one(settings_data)
+            await db.settings.insert_one(clean_docs(settings_data))
+            logger.info(f"Imported settings: {list(settings_data.keys())}")
 
         # Substitutions
         if is_jsx_format:
@@ -760,12 +790,15 @@ async def import_backup(data: Dict[str, Any] = Body(...)):
             }
         else:
             subs_data = data.get("substitutions")
-        if subs_data:
+        if subs_data and isinstance(subs_data, dict):
             await db.substitutions.delete_many({})
-            await db.substitutions.insert_one(subs_data)
+            await db.substitutions.insert_one(clean_docs(subs_data))
+            logger.info(f"Imported substitutions: {subs_data}")
 
+        logger.info("Backup import completed successfully")
         return {"success": True}
     except Exception as e:
+        logger.error(f"Backup import failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ─── ANALYTICS ENDPOINTS ─────────────────────────────────────────────────────
