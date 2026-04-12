@@ -4,6 +4,7 @@ import { api } from './utils/api';
 import { fmtDate, can, sha256, EDIT_PERMS, GUEST_USER } from './utils/helpers';
 import TeamsPage from './components/TeamsPage';
 import SettingsPage from './components/SettingsPage';
+import MatchDetailModal from './components/MatchDetailModal';
 
 // Toast notification component
 const Toast = ({ message, type = 'success', onClose }) => (
@@ -307,20 +308,24 @@ function LeaderboardPage({ currentUser, showToast }) {
   const [matches, setMatches] = useState([]);
   const [matchPoints, setMatchPoints] = useState({});
   const [settings, setSettings] = useState(null);
+  const [teams, setTeams] = useState({ teamA: [], teamB: [] });
   const [loading, setLoading] = useState(true);
   const [refreshingId, setRefreshingId] = useState(null);
   const [refreshingMode, setRefreshingMode] = useState(null);
+  const [selectedMatch, setSelectedMatch] = useState(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [matchesRes, pointsRes, settingsRes] = await Promise.all([
+      const [matchesRes, pointsRes, settingsRes, teamsRes] = await Promise.all([
         api.getMatches(),
         api.getAllMatchPoints(),
-        api.getSettings()
+        api.getSettings(),
+        api.getTeams()
       ]);
       setMatches(matchesRes.data);
       setMatchPoints(pointsRes.data);
       setSettings(settingsRes.data);
+      setTeams(teamsRes.data);
       setLoading(false);
     } catch (e) {
       showToast('Failed to load data', 'error');
@@ -360,6 +365,20 @@ function LeaderboardPage({ currentUser, showToast }) {
     }
     setRefreshingId(null);
     setRefreshingMode(null);
+  };
+
+  // Handle save from match detail modal
+  const handleMatchDetailSave = (matchId, newPoints, updatedMatch) => {
+    if (newPoints) {
+      setMatchPoints(prev => ({ ...prev, [matchId]: newPoints }));
+      showToast('Match points saved!');
+    }
+    if (updatedMatch) {
+      setMatches(prev => prev.map(m => m.id === matchId ? updatedMatch : m));
+      // Update selectedMatch so modal reflects changes
+      setSelectedMatch(updatedMatch);
+      showToast('Match info updated!');
+    }
   };
 
   if (loading || !settings) {
@@ -421,7 +440,7 @@ function LeaderboardPage({ currentUser, showToast }) {
           return (
             <div key={m.id} className="bg-slate-800/50 rounded-lg overflow-hidden border border-slate-700 hover:border-slate-600 transition-all" data-testid={`match-row-${m.id}`}>
               <div className="flex items-center">
-                <div className="flex-1 p-4">
+                <button className="flex-1 p-4 text-left hover:bg-slate-750 transition-colors" onClick={() => setSelectedMatch(m)} data-testid={`match-click-${m.id}`}>
                   <div className="flex items-center gap-3 mb-1">
                     <span className="bg-slate-700 px-2 py-1 rounded text-xs font-mono">M{m.no}</span>
                     <span className="font-semibold">{m.t1} vs {m.t2}</span>
@@ -441,7 +460,7 @@ function LeaderboardPage({ currentUser, showToast }) {
                       {refreshingMode === 'api' ? '📡 Fetching from CricketData API...' : '🤖 Claude searching the web...'}
                     </div>
                   )}
-                </div>
+                </button>
 
                 {hasData ? (
                   <div className="flex gap-6 px-4 text-center">
@@ -504,6 +523,23 @@ function LeaderboardPage({ currentUser, showToast }) {
           );
         })}
       </div>
+
+      {/* Match Detail Modal */}
+      {selectedMatch && (
+        <MatchDetailModal
+          match={selectedMatch}
+          matchPoints={matchPoints}
+          teams={teams}
+          settings={settings}
+          onClose={() => setSelectedMatch(null)}
+          onSave={handleMatchDetailSave}
+          onRefreshAPI={handleRefreshAPI}
+          onRefreshClaude={handleRefreshClaude}
+          refreshingId={refreshingId}
+          refreshingMode={refreshingMode}
+          currentUser={currentUser}
+        />
+      )}
     </div>
   );
 }
